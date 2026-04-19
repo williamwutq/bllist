@@ -2,5 +2,14 @@
 name = "bllist"
 version = "0.1.0"
 edition = "2024"
+authors = ["William Wu <williamwutq@gmail.com>", "Claude <claude@anthropic.com>"]
+license = "MIT"
+description = "Persistent block lists (fixed & dynamic) with reclamation and checksums, built on top of bstack"
+readme = "README.md"
+changelog = "CHANGELOG.md"
+repository = "https://github.com/williamwutq/bllist"
+documentation = "https://docs.rs/llist"
+keywords = ["list", "persistent", "file-backed", "database", "binary"]
 
 [dependencies]
+bstack = { version = ">=0.1.2", features = ["set"] }

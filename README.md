@@ -162,8 +162,3 @@ BStack can bypass the lock and cause corruption.
 not write to the file and will not disturb the bllist state. Mutating calls
 (`push`, `pop`, `set`) must not be used.
 
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).

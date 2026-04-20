@@ -132,6 +132,38 @@ The const generic parameter is the exact number of bytes you want to store per b
 
 ---
 
+## Direct file access — use with extreme caution
+
+A `bllist` file is a valid BStack file, so you can open it with
+`bstack::BStack::open` or inspect the raw bytes with any file tool.
+**Writing to the file outside of `bllist` is strongly discouraged.**
+`bllist` does not re-validate structural invariants on every operation, so
+direct writes can silently corrupt the list in ways that are not caught until
+much later — or not caught at all.
+
+Specific dangers:
+
+| Operation                          | Risk |
+|------------------------------------|------|
+| `BStack::push`                     | Appends raw bytes that are not a complete, aligned block; breaks slot enumeration and orphan recovery |
+| `BStack::pop`                      | May truncate a block mid-stream or destroy the bllist header |
+| `BStack::set` at offsets 0–23      | Overwrites the bllist header; can corrupt the root or free-list-head pointer |
+| `BStack::set` inside a block       | Invalidates the block's CRC; `read` will return a checksum error |
+| Raw file writes (`write(2)`, etc.) | Bypasses the advisory lock entirely; any of the above, plus potential torn writes |
+
+**The exclusive advisory lock** (`flock` on Unix, `LockFileEx` on Windows)
+held by a live `FixedBlockList` prevents a second process from opening the
+same file through BStack simultaneously. It does **not** prevent raw file
+descriptor access, so a process that opens the file without going through
+BStack can bypass the lock and cause corruption.
+
+**Safe read-only inspection** is possible: open the file with
+`bstack::BStack::open` and use only `get`, `peek`, and `len`. These calls do
+not write to the file and will not disturb the bllist state. Mutating calls
+(`push`, `pop`, `set`) must not be used.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

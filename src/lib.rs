@@ -53,6 +53,34 @@
 //! returning. If the process is killed mid-operation the worst case is one
 //! *orphaned* block that is silently reclaimed the next time the file is
 //! opened.
+//!
+//! ## Direct file access — use with extreme caution
+//!
+//! Because a `bllist` file is a valid BStack file, you can open it with
+//! [`bstack::BStack::open`] or inspect the raw bytes with any file tool.
+//! **This is strongly discouraged for anything other than read-only
+//! inspection.** Writing to the file outside of `bllist` breaks structural
+//! invariants that `bllist` does not re-check on every operation:
+//!
+//! | Direct BStack operation      | Risk |
+//! |------------------------------|------|
+//! | `BStack::push`               | Appends raw bytes that are not a complete, aligned block; corrupts slot enumeration and orphan recovery |
+//! | `BStack::pop`                | May truncate the middle of a block or the bllist header itself |
+//! | `BStack::set` at offset 0–23 | Overwrites the bllist header; can corrupt the root or free-list pointer |
+//! | `BStack::set` inside a block | Invalidates the block's CRC; the next `read` returns [`Error::ChecksumMismatch`] |
+//!
+//! The exclusive advisory lock ([`flock`] on Unix, `LockFileEx` on Windows)
+//! held by a live `FixedBlockList` prevents a second process from opening the
+//! same file simultaneously, so accidental concurrent access is prevented
+//! while the list is open. However, the lock is **advisory**: a process that
+//! opens the underlying file descriptor directly (without going through BStack)
+//! will bypass it entirely.
+//!
+//! If you need to inspect a file for debugging while `bllist` is not running,
+//! read-only `BStack` access (via [`bstack::BStack::open`] followed only by
+//! `get` / `peek` / `len` calls) is safe and will not modify the file.
+//!
+//! [`flock`]: https://man7.org/linux/man-pages/man2/flock.2.html
 
 pub mod error;
 pub mod fixed;

@@ -182,10 +182,16 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
         let total = stack.len()?;
 
         if total == 0 {
-            let h = Header { root: 0, free_list_head: 0 };
+            let h = Header {
+                root: 0,
+                free_list_head: 0,
+            };
             let offset = stack.push(&h.to_bytes())?;
             debug_assert_eq!(offset, 0, "bllist header must land at logical offset 0");
-            return Ok(Self { stack, mu: Mutex::new(()) });
+            return Ok(Self {
+                stack,
+                mu: Mutex::new(()),
+            });
         }
 
         if total < HEADER_SIZE {
@@ -200,7 +206,10 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
 
         Self::recover_orphans(&stack, &mut header, total)?;
 
-        Ok(Self { stack, mu: Mutex::new(()) })
+        Ok(Self {
+            stack,
+            mu: Mutex::new(()),
+        })
     }
 
     /// Returns the number of payload bytes available in each block.
@@ -251,7 +260,10 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
     pub fn write(&self, block: BlockRef, data: &[u8]) -> Result<(), Error> {
         let cap = Self::PAYLOAD_CAPACITY;
         if data.len() > cap {
-            return Err(Error::DataTooLarge { capacity: cap, provided: data.len() });
+            return Err(Error::DataTooLarge {
+                capacity: cap,
+                provided: data.len(),
+            });
         }
         self.validate_block_offset(block.0)?;
 
@@ -306,7 +318,10 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
     pub fn read_into(&self, block: BlockRef, buf: &mut [u8]) -> Result<(), Error> {
         let cap = Self::PAYLOAD_CAPACITY;
         if buf.len() > cap {
-            return Err(Error::DataTooLarge { capacity: cap, provided: buf.len() });
+            return Err(Error::DataTooLarge {
+                capacity: cap,
+                provided: buf.len(),
+            });
         }
         self.validate_block_offset(block.0)?;
 
@@ -362,14 +377,22 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
         let mut next_buf = [0u8; 8];
         self.stack.get_into(block.0 + 4, &mut next_buf)?;
         let next = u64::from_le_bytes(next_buf);
-        Ok(if next == 0 { None } else { Some(BlockRef(next)) })
+        Ok(if next == 0 {
+            None
+        } else {
+            Some(BlockRef(next))
+        })
     }
 
     /// Return the head of the active list, or `None` if the list is empty.
     pub fn root(&self) -> Result<Option<BlockRef>, Error> {
         let _g = self.mu.lock().unwrap();
         let header = self.read_header_locked()?;
-        Ok(if header.root == 0 { None } else { Some(BlockRef(header.root)) })
+        Ok(if header.root == 0 {
+            None
+        } else {
+            Some(BlockRef(header.root))
+        })
     }
 
     /// Allocate a block, write `data` to it, and prepend it to the list.
@@ -388,7 +411,10 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
     pub fn push_front(&self, data: &[u8]) -> Result<BlockRef, Error> {
         let cap = Self::PAYLOAD_CAPACITY;
         if data.len() > cap {
-            return Err(Error::DataTooLarge { capacity: cap, provided: data.len() });
+            return Err(Error::DataTooLarge {
+                capacity: cap,
+                provided: data.len(),
+            });
         }
         let _g = self.mu.lock().unwrap();
         let mut header = self.read_header_locked()?;
@@ -448,7 +474,10 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
     pub fn pop_front_into(&self, buf: &mut [u8]) -> Result<bool, Error> {
         let cap = Self::PAYLOAD_CAPACITY;
         if buf.len() > cap {
-            return Err(Error::DataTooLarge { capacity: cap, provided: buf.len() });
+            return Err(Error::DataTooLarge {
+                capacity: cap,
+                provided: buf.len(),
+            });
         }
         let _g = self.mu.lock().unwrap();
         let mut header = self.read_header_locked()?;
@@ -475,7 +504,7 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
 
     /// Assert that `offset` is a valid block boundary.
     fn validate_block_offset(&self, offset: u64) -> Result<(), Error> {
-        if offset < HEADER_SIZE || (offset - HEADER_SIZE) % BLOCK_SIZE as u64 != 0 {
+        if offset < HEADER_SIZE || !(offset - HEADER_SIZE).is_multiple_of(BLOCK_SIZE as u64) {
             return Err(Error::InvalidBlock);
         }
         Ok(())
@@ -508,7 +537,7 @@ impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
         } else {
             let offset = self.stack.push(&[0u8; BLOCK_SIZE])?;
             debug_assert!(
-                offset >= HEADER_SIZE && (offset - HEADER_SIZE) % BLOCK_SIZE as u64 == 0,
+                offset >= HEADER_SIZE && (offset - HEADER_SIZE).is_multiple_of(BLOCK_SIZE as u64),
                 "newly pushed block has misaligned offset {offset}"
             );
             Ok(BlockRef(offset))
@@ -648,7 +677,12 @@ mod tests {
     fn tmp(label: &str) -> std::path::PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        p.push(format!("bllist_{}_{}_{}.blls", std::process::id(), label, n));
+        p.push(format!(
+            "bllist_{}_{}_{}.blls",
+            std::process::id(),
+            label,
+            n
+        ));
         p
     }
 
@@ -902,7 +936,10 @@ mod tests {
         {
             let stack = BStack::open(&path).unwrap();
             // Write a valid bllist header manually.
-            let hdr = Header { root: 0, free_list_head: 0 };
+            let hdr = Header {
+                root: 0,
+                free_list_head: 0,
+            };
             let off = stack.push(&hdr.to_bytes()).unwrap();
             assert_eq!(off, 0);
             // Push a raw block (simulating a crash after alloc but before link).

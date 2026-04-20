@@ -15,8 +15,8 @@
 //! use bllist::FixedBlockList;
 //!
 //! // Open (or create) a list backed by "data.blls".
-//! // Each block is 64 bytes → 52 bytes of payload.
-//! let list = FixedBlockList::<64>::open("data.blls")?;
+//! // 52 bytes of payload per block (64 bytes total on disk).
+//! let list = FixedBlockList::<52>::open("data.blls")?;
 //!
 //! // Push items onto the front.
 //! list.push_front(b"hello")?;
@@ -37,10 +37,10 @@
 //! │  BStack header (16 B)    │  bllist header (24 B at logical offset 0) │
 //! │  "BSTK" magic + clen     │  "BLLS" + version + root + free_head      │
 //! ├──────────────────────────┴───────────────────────────────────────────┤
-//! │  Block 0  (BLOCK_SIZE bytes, logical offset 24)                      │
-//! │  checksum(4) │ next(8) │ payload(BLOCK_SIZE − 12)                    │
+//! │  Block 0  (PAYLOAD_CAPACITY+12 bytes, logical offset 24)             │
+//! │  checksum(4) │ next(8) │ payload(PAYLOAD_CAPACITY)                   │
 //! ├──────────────────────────────────────────────────────────────────────┤
-//! │  Block 1  (BLOCK_SIZE bytes, logical offset 24 + BLOCK_SIZE)  …      │
+//! │  Block 1  (PAYLOAD_CAPACITY+12 bytes, logical offset 24+PC+12)  …    │
 //! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 //!

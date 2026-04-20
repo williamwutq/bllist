@@ -123,6 +123,15 @@ pub struct FixedBlockList<const BLOCK_SIZE: usize> {
     mu: Mutex<()>,
 }
 
+impl<const BLOCK_SIZE: usize> std::fmt::Debug for FixedBlockList<BLOCK_SIZE> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FixedBlockList")
+            .field("block_size", &BLOCK_SIZE)
+            .field("payload_capacity", &Self::PAYLOAD_CAPACITY)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<const BLOCK_SIZE: usize> FixedBlockList<BLOCK_SIZE> {
     // ── associated constants ──────────────────────────────────────────────────
 
@@ -679,7 +688,7 @@ mod tests {
 
         drop(list);
         let _ = std::fs::remove_file(&path);
-        drop((b0, b2, b3));
+        let _ = (b0, b2, b3);
     }
 
     // ── write / read round-trip ───────────────────────────────────────────────
@@ -772,23 +781,25 @@ mod tests {
     #[test]
     fn checksum_mismatch_on_corrupt_block() {
         let path = tmp("crc");
-        let list = List::open(&path).unwrap();
-        let block = list.alloc().unwrap();
-        list.write(block, b"integrity").unwrap();
-        drop(list);
+        {
+            // Push a block so it is in the active list (root).
+            let list = List::open(&path).unwrap();
+            list.push_front(b"integrity").unwrap();
+        }
 
         // Corrupt one byte of the payload area via BStack directly.
-        let stack = BStack::open(&path).unwrap();
-        let mut corrupt = vec![0u8; 1];
-        stack.get_into(block.0 + 12, &mut corrupt).unwrap();
-        corrupt[0] ^= 0xFF;
-        stack.set(block.0 + 12, &corrupt).unwrap();
-        drop(stack);
+        {
+            let stack = BStack::open(&path).unwrap();
+            // Block 0 is at logical offset 24; payload starts at offset 24+12=36.
+            let block_offset: u64 = 24;
+            let mut byte = [0u8; 1];
+            stack.get_into(block_offset + 12, &mut byte).unwrap();
+            byte[0] ^= 0xFF;
+            stack.set(block_offset + 12, &byte).unwrap();
+        }
 
-        let list2 = List::open(&path).unwrap();
-        // The corrupt block is not in the active list, so open succeeds.
-        // Reading it must fail.
-        let err = list2.read(block).unwrap_err();
+        // Reopen: the active list walk hits the corrupt block → open() fails.
+        let err = List::open(&path).unwrap_err();
         assert!(matches!(err, Error::ChecksumMismatch { .. }));
 
         let _ = std::fs::remove_file(&path);

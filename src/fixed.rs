@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -28,6 +29,52 @@ const BLOCK_HEADER_SIZE: usize = 12;
 /// header) and is used internally to represent *null* / end-of-list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockRef(pub u64);
+
+impl fmt::Display for BlockRef {
+    /// Formats the block reference as `@offset` (decimal).
+    ///
+    /// Use `{:x}` / `{:#x}` for hexadecimal output via [`LowerHex`](fmt::LowerHex).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "@{}", self.0)
+    }
+}
+
+impl fmt::LowerHex for BlockRef {
+    /// Formats the block offset in lower-case hexadecimal.
+    ///
+    /// Respects the `#` flag: `{:#x}` produces `@0x110`, `{:x}` produces `@110`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("@")?;
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl fmt::UpperHex for BlockRef {
+    /// Formats the block offset in upper-case hexadecimal.
+    ///
+    /// Respects the `#` flag: `{:#X}` produces `@0x110`, `{:X}` produces `@110`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("@")?;
+        fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+
+impl From<u64> for BlockRef {
+    /// Create a `BlockRef` from a raw logical byte offset.
+    ///
+    /// No validation is performed; the offset is not checked against the file.
+    /// Use [`FixedBlockList::alloc`] to obtain a valid reference.
+    fn from(offset: u64) -> Self {
+        BlockRef(offset)
+    }
+}
+
+impl From<BlockRef> for u64 {
+    /// Extract the raw logical byte offset from a `BlockRef`.
+    fn from(r: BlockRef) -> u64 {
+        r.0
+    }
+}
 
 // ── Header (in-memory mirror of the 24-byte on-disk bllist header) ───────────
 
@@ -124,12 +171,21 @@ pub struct FixedBlockList<const PAYLOAD_CAPACITY: usize> {
     mu: Mutex<()>,
 }
 
-impl<const PAYLOAD_CAPACITY: usize> std::fmt::Debug for FixedBlockList<PAYLOAD_CAPACITY> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<const PAYLOAD_CAPACITY: usize> fmt::Debug for FixedBlockList<PAYLOAD_CAPACITY> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FixedBlockList")
             .field("payload_capacity", &PAYLOAD_CAPACITY)
             .field("block_size", &(PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE))
             .finish_non_exhaustive()
+    }
+}
+
+impl<const PAYLOAD_CAPACITY: usize> fmt::Display for FixedBlockList<PAYLOAD_CAPACITY> {
+    /// Formats as `FixedBlockList<N>` where `N` is the payload capacity in bytes.
+    ///
+    /// Useful for logging which list configuration is in use.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FixedBlockList<{PAYLOAD_CAPACITY}>")
     }
 }
 

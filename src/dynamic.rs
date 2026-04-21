@@ -53,6 +53,7 @@
 //! files) and vice versa.  The two list types **cannot** share a file.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -160,6 +161,52 @@ impl DynHeader {
 /// with a different list backed by a different file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DynBlockRef(pub u64);
+
+impl fmt::Display for DynBlockRef {
+    /// Formats the block reference as `@offset` (decimal).
+    ///
+    /// Use `{:x}` / `{:#x}` for hexadecimal output via [`LowerHex`](fmt::LowerHex).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "@{}", self.0)
+    }
+}
+
+impl fmt::LowerHex for DynBlockRef {
+    /// Formats the block offset in lower-case hexadecimal.
+    ///
+    /// Respects the `#` flag: `{:#x}` produces `@0x110`, `{:x}` produces `@110`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("@")?;
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl fmt::UpperHex for DynBlockRef {
+    /// Formats the block offset in upper-case hexadecimal.
+    ///
+    /// Respects the `#` flag: `{:#X}` produces `@0x110`, `{:X}` produces `@110`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("@")?;
+        fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+
+impl From<u64> for DynBlockRef {
+    /// Create a `DynBlockRef` from a raw logical byte offset.
+    ///
+    /// No validation is performed; the offset is not checked against the file.
+    /// Use [`DynamicBlockList::alloc`] to obtain a valid reference.
+    fn from(offset: u64) -> Self {
+        DynBlockRef(offset)
+    }
+}
+
+impl From<DynBlockRef> for u64 {
+    /// Extract the raw logical byte offset from a `DynBlockRef`.
+    fn from(r: DynBlockRef) -> u64 {
+        r.0
+    }
+}
 
 // ── DynamicBlockList ──────────────────────────────────────────────────────────
 
@@ -282,11 +329,21 @@ pub struct DynamicBlockList {
 unsafe impl Send for DynamicBlockList {}
 unsafe impl Sync for DynamicBlockList {}
 
-impl std::fmt::Debug for DynamicBlockList {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DynamicBlockList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynamicBlockList")
             .field("num_bins", &NUM_BINS)
             .finish()
+    }
+}
+
+impl fmt::Display for DynamicBlockList {
+    /// Formats as `DynamicBlockList`.
+    ///
+    /// Useful for logging which list is in use alongside [`Display`](fmt::Display)
+    /// output of [`DynBlockRef`] offsets.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DynamicBlockList")
     }
 }
 

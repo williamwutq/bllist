@@ -88,3 +88,31 @@ impl From<io::Error> for Error {
         Error::Io(e)
     }
 }
+
+impl PartialEq for Error {
+    /// Two `Error` values are equal when their discriminants and payloads match.
+    ///
+    /// `Io` variants are compared by [`io::ErrorKind`] because [`io::Error`]
+    /// does not implement [`PartialEq`] itself.  Two `Io` errors with the same
+    /// kind but different OS error codes compare equal under this definition.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Error::Io(a), Error::Io(b)) => a.kind() == b.kind(),
+            (Error::ChecksumMismatch { block: a }, Error::ChecksumMismatch { block: b }) => a == b,
+            (Error::Corruption(a), Error::Corruption(b)) => a == b,
+            (Error::InvalidBlock, Error::InvalidBlock) => true,
+            (Error::BlockTooSmall, Error::BlockTooSmall) => true,
+            (
+                Error::DataTooLarge {
+                    capacity: ca,
+                    provided: pa,
+                },
+                Error::DataTooLarge {
+                    capacity: cb,
+                    provided: pb,
+                },
+            ) => ca == cb && pa == pb,
+            _ => false,
+        }
+    }
+}

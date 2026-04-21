@@ -223,7 +223,10 @@ impl DynamicBlockList {
                 bin_heads: [0u64; NUM_BINS],
             };
             let offset = stack.push(&hdr.to_bytes())?;
-            debug_assert_eq!(offset, 0, "dynamic-list header must land at logical offset 0");
+            debug_assert_eq!(
+                offset, 0,
+                "dynamic-list header must land at logical offset 0"
+            );
             return Ok(Self {
                 stack,
                 mu: Mutex::new(()),
@@ -689,10 +692,7 @@ impl DynamicBlockList {
     }
 
     /// Read, CRC-verify, and return `(next, cap, data)` for a block.
-    fn read_block_full_static(
-        stack: &BStack,
-        offset: u64,
-    ) -> Result<(u64, usize, Vec<u8>), Error> {
+    fn read_block_full_static(stack: &BStack, offset: u64) -> Result<(u64, usize, Vec<u8>), Error> {
         let mut hdr = [0u8; BLOCK_HEADER_SIZE];
         stack.get_into(offset, &mut hdr)?;
         let stored_crc = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
@@ -731,8 +731,7 @@ impl DynamicBlockList {
     }
 
     fn read_block_full(&self, offset: u64) -> Result<(u64, Vec<u8>), Error> {
-        Self::read_block_full_static(&self.stack, offset)
-            .map(|(next, _, data)| (next, data))
+        Self::read_block_full_static(&self.stack, offset).map(|(next, _, data)| (next, data))
     }
 
     /// Scan all committed block slots and reclaim any orphans into their bins.
@@ -1130,9 +1129,9 @@ mod tests {
         let list = DynamicBlockList::open(&path).unwrap();
 
         // Push items that round to different bin capacities.
-        list.push_front(&[0u8; 1]).unwrap();     // cap 1
-        list.push_front(&[1u8; 100]).unwrap();   // cap 128
-        list.push_front(&[2u8; 10]).unwrap();    // cap 16
+        list.push_front(&[0u8; 1]).unwrap(); // cap 1
+        list.push_front(&[1u8; 100]).unwrap(); // cap 128
+        list.push_front(&[2u8; 10]).unwrap(); // cap 16
 
         let d3 = list.pop_front().unwrap().unwrap();
         assert_eq!(d3, vec![2u8; 10]);

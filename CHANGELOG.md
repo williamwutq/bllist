@@ -7,7 +7,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [Unreleased]
+## [0.1.0] - 2026-04-21
 
 ### Added
 
@@ -45,25 +45,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - `pop_front_into(buf)` — zero-copy variant of `pop_front`
   - `capacity_for(size)` — `const fn`: next power of two ≥ `size` (minimum 1)
 - 25 unit tests for `DynamicBlockList`.
-
-### Changed
-
-- **Breaking** — `FixedBlockList<const BLOCK_SIZE: usize>` renamed to
-  `FixedBlockList<const PAYLOAD_CAPACITY: usize>`. The const generic now
-  expresses the number of **payload bytes** per block directly, rather than
-  the total on-disk block size. Callers must update their type instantiations:
-  `FixedBlockList::<64>` → `FixedBlockList::<52>` (for the same 64-byte
-  on-disk block). On-disk format is unchanged.
-- `PAYLOAD_CAPACITY` associated const removed; the const generic itself is
-  the payload capacity. `payload_capacity()` still works.
-- Compile-time assertion updated: `PAYLOAD_CAPACITY > 0` (was `BLOCK_SIZE > 12`).
-
----
-
-## [0.1.0] — 2026-04-20
-
-### Added
-
 - `FixedBlockList<const PAYLOAD_CAPACITY: usize>` — crash-safe singly-linked
   list of fixed-size blocks backed by a single BStack file.
 - `BlockRef(u64)` — `Copy` handle encoding a block's logical byte offset.
@@ -97,10 +78,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   do not acquire the mutex.
 - 20 unit tests and 2 doc tests.
 
+
 ### Dependencies
 
 - [`bstack`](https://crates.io/crates/bstack) `>=0.1.3` with `features = ["set"]`
 - [`crc32fast`](https://crates.io/crates/crc32fast) `1.5`
 
-[Unreleased]: https://github.com/williamwutq/bllist/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/williamwutq/bllist/releases/tag/v0.1.0

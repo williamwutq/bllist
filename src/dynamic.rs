@@ -12,10 +12,10 @@
 //! │  BStack header (16 B)    │  bllist-dynamic header (272 B, logical off 0) │
 //! │  "BSTK" magic + clen     │  "BLLD" + version + root + bin_heads[32]      │
 //! ├──────────────────────────┴───────────────────────────────────────────────┤
-//! │  Block (variable size)                                                    │
+//! │  Block (variable size)                                                   │
 //! │  checksum(4) │ next(8) │ capacity(4) │ data_len(4) │ payload(capacity B) │
 //! ├──────────────────────────────────────────────────────────────────────────┤
-//! │  Block …                                                                  │
+//! │  Block …                                                                 │
 //! └──────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -166,16 +166,111 @@ pub struct DynBlockRef(pub u64);
 /// A durable, crash-safe singly-linked list of variable-size blocks backed by
 /// a single BStack file.
 ///
-/// Blocks can hold any payload size up to 2^31 bytes.  Internally each
-/// allocation is rounded up to the next power of two so freed blocks can be
-/// reused exactly by future allocations of the same or smaller size.
+/// Each block stores an arbitrary payload of up to 2^31 bytes.  The file
+/// format uses magic bytes `"BLLD"`, which means a `DynamicBlockList` file
+/// cannot be opened as a [`FixedBlockList`](crate::FixedBlockList) and vice
+/// versa — the wrong `open` call returns [`Error::Corruption`](crate::Error)
+/// immediately.
+///
+/// # Bin allocator
+///
+/// `DynamicBlockList` maintains **32 segregated free lists**, one per
+/// power-of-two capacity.  Bin *k* holds all free blocks whose on-disk
+/// capacity equals exactly 2^*k* bytes:
+///
+/// | Bin | Capacity |
+/// |-----|----------|
+/// | 0   | 1 B      |
+/// | 1   | 2 B      |
+/// | 2   | 4 B      |
+/// | 3   | 8 B      |
+/// | …   | …        |
+/// | 10  | 1 KiB    |
+/// | 20  | 1 MiB    |
+/// | 31  | 2 GiB    |
+///
+/// **Allocation** (`alloc(size)`):
+/// 1. Compute *cap* = [`capacity_for(size)`](Self::capacity_for) — the
+///    smallest power of two ≥ `size` (minimum 1).
+/// 2. Derive the bin index *k* = log₂(*cap*).
+/// 3. If bin *k* is non-empty: pop the head of that bin's free list,
+///    flush the updated header, and return the block.  The block's existing
+///    payload is **not** cleared; call [`write`](Self::write) before reading
+///    to avoid stale data.
+/// 4. If bin *k* is empty: extend the file with a single `BStack::push` of
+///    *cap* + 20 bytes (the 20-byte block header pre-filled with the correct
+///    capacity and a valid CRC).  The new block is returned directly — it is
+///    **never** written to a bin first, so there is no double-write.
+///
+/// **Deallocation** (`free(block)`):
+/// 1. Read the block's capacity field to determine the bin.
+/// 2. Zero the payload and set `data_len = 0`.
+/// 3. Write the zeroed block with `next` pointing to the old bin head —
+///    a single durable `set` call.
+/// 4. Update the bin head in the in-memory header and flush it.
+///
+/// Blocks are **never split or coalesced**.  A 128-byte block freed from a
+/// 128-byte allocation goes back to bin 7 and is only reused by a future
+/// `alloc` that also rounds up to 128 bytes (i.e. any `size` in 65–128).
+/// Requests outside that range use a different bin.
+///
+/// # Crash safety
+///
+/// Every mutation flushes durably (via `fsync` / `F_FULLFSYNC`) before
+/// returning.  The worst case of a mid-operation crash is one *orphaned*
+/// block — a block that was allocated (file extended) but not yet linked into
+/// the active list or a bin free list because the process died before the
+/// header write completed.
+///
+/// On the next [`open`](Self::open), orphan recovery runs automatically:
+///
+/// 1. Walk the active list from `root`, collecting all active offsets.
+/// 2. Walk each of the 32 bin free lists, collecting all free offsets.
+/// 3. Scan the file sequentially from the end of the header
+///    (`HEADER_SIZE` = 272), stepping through blocks using each block's
+///    `capacity` field.  Any block not in the active or free sets is an
+///    orphan.
+/// 4. Orphaned blocks are zeroed, given a valid CRC, and linked into the
+///    bin matching their capacity.  The header is then flushed once.
+///
+/// | Crash point | Orphan? | Recovery |
+/// |-------------|---------|----------|
+/// | During `alloc` — `push` incomplete | No (BStack committed_len not updated) | None needed |
+/// | After `alloc` `push`, before `write` | Yes — block in no list | Reclaimed into correct bin |
+/// | After `write`, before root update in `push_front` | Yes — block written but not linked | Reclaimed into correct bin |
+/// | After root update in `pop_front`, before `free` | Yes — old root in no list | Reclaimed into correct bin |
+///
+/// No data that was fully committed (root pointer updated and flushed) is
+/// ever lost.
+///
+/// # Example
+///
+/// ```no_run
+/// use bllist::DynamicBlockList;
+///
+/// // Blocks are sized to the next power of two automatically.
+/// // A 5-byte push uses a 8-byte (bin 3) block on disk.
+/// let list = DynamicBlockList::open("data.blld")?;
+///
+/// list.push_front(b"hello")?;           // 5 bytes → 8-byte block (bin 3)
+/// list.push_front(b"a longer record")?; // 15 bytes → 16-byte block (bin 4)
+///
+/// while let Some(data) = list.pop_front()? {
+///     println!("{}", String::from_utf8_lossy(&data));
+/// }
+/// // prints "a longer record", then "hello"
+/// # Ok::<(), bllist::Error>(())
+/// ```
 ///
 /// # Thread safety
 ///
-/// `DynamicBlockList` is `Send + Sync`.  Header mutations (alloc, free, root
-/// updates) are serialised through an internal `Mutex`.  Block-only reads and
-/// writes (`write`, `read`, `set_next`, …) do not acquire the mutex and are
-/// safe to call concurrently on different blocks.
+/// `DynamicBlockList` is `Send + Sync`.  Header mutations (`alloc`, `free`,
+/// `root`, `push_front`, `pop_front`, `pop_front_into`) are serialised
+/// through an internal `Mutex`.  Block-only operations (`write`, `read`,
+/// `read_into`, `set_next`, `get_next`, `capacity`, `data_len`) do not
+/// acquire the mutex and are safe to call concurrently on **different**
+/// blocks.  Concurrent access to the **same** block from multiple threads
+/// requires external synchronisation.
 pub struct DynamicBlockList {
     stack: BStack,
     mu: Mutex<()>,

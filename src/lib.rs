@@ -82,8 +82,10 @@
 //!
 //! [`flock`]: https://man7.org/linux/man-pages/man2/flock.2.html
 
+pub mod dynamic;
 pub mod error;
 pub mod fixed;
 
+pub use dynamic::{DynBlockRef, DynamicBlockList};
 pub use error::Error;
 pub use fixed::{BlockRef, FixedBlockList};

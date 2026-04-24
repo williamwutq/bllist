@@ -19,6 +19,7 @@ Durable, crash-safe, checksummed block-based linked list allocators stored in a 
 - **Splitting** — when a free block is larger than needed (within `MAX_SPLIT` = 3 levels), it is halved and the spare half returned to its bin, reducing wasted space
 - **Coalescing on open** — adjacent free blocks whose combined size is a power of two are merged into a single larger block, fighting long-term fragmentation
 - **Zero-copy reads** — `read_into` and `pop_front_into` fill a caller-supplied buffer directly from the file
+- **Async I/O** — `AsyncFixedBlockList` and `AsyncDynamicBlockList` wrappers offload every blocking call to Tokio's thread pool; enable with `features = ["async"]`
 - **Thread-safe** — `Send + Sync`; concurrent reads are efficient via `pread` on Unix/Windows
 - **Valid BStack files** — both list types produce valid `bstack` files; the BStack header and crash-recovery semantics are inherited for free
 - **Cross-type protection** — `FixedBlockList` and `DynamicBlockList` use different file magics (`"BLLS"` vs `"BLLD"`) and cannot open each other's files
@@ -31,7 +32,10 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-bllist = "0.1"
+bllist = "0.2"
+
+# Enable async wrappers (requires a Tokio runtime):
+# bllist = { version = "0.2", features = ["async"] }
 ```
 
 ### Fixed-size blocks
@@ -75,6 +79,31 @@ fn main() -> Result<(), bllist::Error> {
     Ok(())
 }
 ```
+
+### Async (Tokio)
+
+Enable the `async` feature and use `AsyncFixedBlockList` / `AsyncDynamicBlockList`:
+
+```rust
+use bllist::AsyncDynamicBlockList;
+
+#[tokio::main]
+async fn main() -> Result<(), bllist::Error> {
+    let list = AsyncDynamicBlockList::open("data.blld").await?;
+
+    list.push_front(b"short record").await?;
+    list.push_front(b"a somewhat longer record").await?;
+
+    while let Some(data) = list.pop_front().await? {
+        println!("{}", String::from_utf8_lossy(&data));
+    }
+
+    Ok(())
+}
+```
+
+The wrappers are `Clone` (cheap `Arc` increment) and share the same underlying
+file handle, so you can hand copies to multiple tasks without reopening the file.
 
 ---
 
@@ -136,6 +165,50 @@ A `Copy` handle encoding a dynamic block's logical byte offset. Analogous to `Bl
 | Method | Description |
 |--------|-------------|
 | `data_start()` → `u64` | Logical offset of the first payload byte (`self.0 + 20`); pure, no I/O |
+
+### `AsyncFixedBlockList<PAYLOAD_CAPACITY>` *(feature `async`)*
+
+An async, `Clone`-able wrapper around `FixedBlockList`. Each method runs on
+Tokio's blocking-thread pool via `spawn_blocking`.  Data inputs accept any
+`impl AsRef<[u8]> + Send + 'static` (e.g. `Vec<u8>`, `Box<[u8]>`, `&'static [u8]`).
+
+| Method | Description |
+|--------|-------------|
+| `open(path).await` | Open or create on a blocking thread |
+| `push_front(data).await` | Allocate, write, prepend to list |
+| `pop_front().await` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
+| `alloc().await` → `BlockRef` | Allocate a raw block |
+| `free(block).await` | Return block to free list |
+| `write(block, data).await` | Write payload, preserve next pointer |
+| `read(block).await` → `Vec<u8>` | Read and checksum-verify payload |
+| `set_next(block, next).await` | Update next pointer |
+| `get_next(block).await` → `Option<BlockRef>` | Read next pointer (no CRC check) |
+| `root().await` → `Option<BlockRef>` | Current head of the active list |
+| `payload_capacity()` | `PAYLOAD_CAPACITY` (no I/O) |
+| `inner()` → `&FixedBlockList<N>` | Underlying sync handle for streaming reads |
+
+### `AsyncDynamicBlockList` *(feature `async`)*
+
+An async, `Clone`-able wrapper around `DynamicBlockList`. Same `spawn_blocking`
+approach as `AsyncFixedBlockList`.
+
+| Method | Description |
+|--------|-------------|
+| `open(path).await` | Open or create on a blocking thread |
+| `push_front(data).await` | Allocate, write, prepend to list |
+| `pop_front().await` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
+| `alloc(size).await` → `DynBlockRef` | Allocate block; splits or extends file |
+| `free(block).await` | Return block to its bin |
+| `write(block, data).await` | Write payload, update `data_len` |
+| `read(block).await` → `Vec<u8>` | Read `data_len` bytes, checksum-verify |
+| `set_next(block, next).await` | Update next pointer |
+| `get_next(block).await` → `Option<DynBlockRef>` | Read next pointer (no CRC check) |
+| `root().await` → `Option<DynBlockRef>` | Current head of the active list |
+| `capacity(block).await` → `usize` | Payload capacity = `block_size − 20` |
+| `data_len(block).await` → `usize` | Bytes last written to this block |
+| `data_end(block).await` → `u64` | Logical offset past the last written byte |
+| `block_size_for(size)` | Smallest power-of-two total size ≥ `size + 20` (no I/O) |
+| `inner()` → `&DynamicBlockList` | Underlying sync handle for streaming reads |
 
 ---
 

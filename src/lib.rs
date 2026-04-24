@@ -95,6 +95,60 @@
 //! *orphaned* block that is silently reclaimed the next time the file is
 //! opened.
 //!
+//! ## Async I/O *(feature `async`)*
+//!
+//! Enable with `features = ["async"]` in your `Cargo.toml`.  This adds two
+//! [`Clone`]-able wrapper types — [`AsyncFixedBlockList`] and
+//! [`AsyncDynamicBlockList`] — that run every operation on Tokio's blocking-
+//! thread pool via [`tokio::task::spawn_blocking`]:
+//!
+//! ```no_run
+//! # #[cfg(feature = "async")]
+//! # async fn example() -> Result<(), bllist::Error> {
+//! use bllist::AsyncDynamicBlockList;
+//!
+//! let list = AsyncDynamicBlockList::open("data.blld").await?;
+//!
+//! list.push_front(b"hello").await?;
+//! list.push_front(b"world").await?;
+//!
+//! while let Some(data) = list.pop_front().await? {
+//!     println!("{}", String::from_utf8_lossy(&data));
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Both wrapper types are `Clone`, so a single `open` call is enough even
+//! when multiple tasks need concurrent access:
+//!
+//! ```no_run
+//! # #[cfg(feature = "async")]
+//! # async fn example() -> Result<(), bllist::Error> {
+//! use bllist::AsyncFixedBlockList;
+//! use std::sync::Arc;
+//!
+//! let list = AsyncFixedBlockList::<52>::open("data.blls").await?;
+//! let list2 = list.clone(); // cheap Arc clone; shares the same file handle
+//!
+//! let h = tokio::spawn(async move {
+//!     list2.push_front(b"from task").await
+//! });
+//! list.push_front(b"from main").await?;
+//! h.await.unwrap()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Data inputs accept `impl AsRef<[u8]> + Send + 'static`, so both
+//! `Vec<u8>` (owned, no extra copy) and `&'static [u8]` (static byte strings)
+//! work directly.
+//!
+//! The underlying synchronous list is always accessible via
+//! [`AsyncFixedBlockList::inner`] / [`AsyncDynamicBlockList::inner`] for
+//! operations that do not need async (e.g. pure-computation helpers or
+//! streaming raw reads through [`DynamicBlockList::bstack`]).
+//!
 //! ## Streaming reads (`DynamicBlockList`)
 //!
 //! [`read`](DynamicBlockList::read) and [`read_into`](DynamicBlockList::read_into)

@@ -7,6 +7,39 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`async` feature flag** — opt-in Tokio integration; add
+  `bllist = { version = "0.2", features = ["async"] }` to enable.
+- **`AsyncFixedBlockList<PAYLOAD_CAPACITY>`** — async wrapper around
+  `FixedBlockList`.  Every method (`open`, `alloc`, `free`, `write`, `read`,
+  `set_next`, `get_next`, `root`, `push_front`, `pop_front`) runs on Tokio's
+  blocking-thread pool via `tokio::task::spawn_blocking`.  The type is `Clone`
+  (cheap `Arc` increment) so multiple tasks can share one file handle without
+  reopening it.
+- **`AsyncDynamicBlockList`** — async wrapper around `DynamicBlockList` with
+  the same design.  Adds async versions of `alloc(size)`, `free`, `write`,
+  `read`, `set_next`, `get_next`, `root`, `capacity`, `data_len`, `data_end`,
+  `push_front`, and `pop_front`.
+- Data inputs accept `impl AsRef<[u8]> + Send + 'static` (e.g. `Vec<u8>`,
+  `Box<[u8]>`, `&'static [u8]`) — no extra copy is made when owned data is
+  provided.
+- `inner()` method on both async types returns a `&`-reference to the
+  underlying synchronous list, enabling direct BStack streaming reads from
+  async contexts.
+- 22 new unit tests (using `#[tokio::test]`) covering open, alloc/free, write/read,
+  set/get_next, push/pop LIFO, mixed sizes, clone sharing, and persistence
+  across reopen — for both async wrapper types.
+
+### Dependencies
+
+- [`tokio`](https://crates.io/crates/tokio) `1` with `features = ["rt"]`
+  (optional; only compiled when `features = ["async"]` is set).
+
+---
+
 ## [0.2.0] - 2026-04-24
 
 ### Changed

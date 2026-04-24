@@ -777,6 +777,43 @@ impl DynamicBlockList {
 
     // ── utility ───────────────────────────────────────────────────────────────
 
+    /// Return a shared reference to the underlying [`BStack`] file handle.
+    ///
+    /// This gives direct access to the raw byte store and is intended for
+    /// **read-only** streaming operations — for example, reading a block's
+    /// payload in a single `pread` call without the CRC overhead of
+    /// [`read`](Self::read):
+    ///
+    /// ```no_run
+    /// use bllist::DynamicBlockList;
+    ///
+    /// let list = DynamicBlockList::open("data.blld")?;
+    /// # let block = list.alloc(0)?;
+    ///
+    /// // Compute the byte range of the written data without reading it yet.
+    /// let start = block.data_start();          // pure — no I/O
+    /// let end   = list.data_end(block)?;       // reads data_len field
+    ///
+    /// // Issue a single read directly into a caller-owned buffer.
+    /// let mut buf = vec![0u8; (end - start) as usize];
+    /// list.bstack().get_into(start, &mut buf)?;
+    /// # Ok::<(), bllist::Error>(())
+    /// ```
+    ///
+    /// # Safety of direct BStack access
+    ///
+    /// The read-only BStack operations (`get`, `get_into`, `peek`, `len`) are
+    /// safe to call at any time and will not disturb the list state.
+    ///
+    /// **Do not call any mutating BStack method** (`push`, `pop`, `set`) on the
+    /// returned handle.  Doing so can corrupt the free-list pointers, the bin
+    /// heads, the root pointer, or block checksums in ways that are not caught
+    /// until a later operation — or not caught at all.  The `bllist` mutex does
+    /// **not** protect against direct BStack mutations.
+    pub fn bstack(&self) -> &BStack {
+        &self.stack
+    }
+
     /// Return the smallest power-of-two total block size that can hold `size`
     /// bytes of payload, including the 20-byte block header.
     ///

@@ -139,6 +139,45 @@ A `Copy` handle encoding a dynamic block's logical byte offset. Analogous to `Bl
 
 ---
 
+## Streaming reads
+
+`read()` and `read_into()` verify the CRC on every call and either allocate a
+`Vec<u8>` or copy into a caller buffer.  For large payloads — or when you need
+to hand a byte range to another layer (e.g. `sendfile`, a scatter-gather
+buffer, or an async runtime) — `DynamicBlockList` exposes three building
+blocks that let you issue a single raw read:
+
+| Building block | I/O cost | Returns |
+|---|---|---|
+| `block.data_start()` | none (pure arithmetic) | start of payload as `u64` |
+| `list.data_end(block)?` | 1 × 4-byte read (`data_len`) | one-past-end of written data as `u64` |
+| `list.bstack().get_into(start, buf)?` | 1 × `pread` of your chosen length | fills `buf` from the file |
+
+```rust
+use bllist::DynamicBlockList;
+
+let list = DynamicBlockList::open("data.blld")?;
+// … obtain `block` from push_front / pop_front / root traversal …
+
+// Compute the byte range with no file I/O.
+let start: u64 = block.data_start();
+let end:   u64 = list.data_end(block)?;  // one 4-byte read
+
+// Single pread into a caller-owned buffer — no CRC, no Vec allocation.
+let mut buf = vec![0u8; (end - start) as usize];
+list.bstack().get_into(start, &mut buf)?;
+
+// Or fill a sub-range of an existing buffer:
+list.bstack().get_into(start, &mut frame[offset..])?;
+```
+
+> **Only read-only BStack operations are safe**: `get`, `get_into`, `peek`,
+> `len`.  Never call `push`, `pop`, or `set` on the handle returned by
+> `bstack()` — doing so can silently corrupt the list structure.  Use `read()`
+> or `read_into()` when CRC verification matters.
+
+---
+
 ## File layouts
 
 ### `FixedBlockList` files (`"BLLS"`)

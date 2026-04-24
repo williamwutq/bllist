@@ -95,6 +95,43 @@
 //! *orphaned* block that is silently reclaimed the next time the file is
 //! opened.
 //!
+//! ## Streaming reads (`DynamicBlockList`)
+//!
+//! [`read`](DynamicBlockList::read) and [`read_into`](DynamicBlockList::read_into)
+//! always verify the CRC and copy or allocate on every call.  For large
+//! payloads — or when you need to pass a byte range to another layer (e.g.
+//! `sendfile`, a scatter-gather buffer, or an async runtime) — you can compute
+//! the exact file offsets and issue a single raw read through the underlying
+//! [`BStack`](bstack::BStack):
+//!
+//! ```no_run
+//! use bllist::DynamicBlockList;
+//!
+//! let list = DynamicBlockList::open("data.blld")?;
+//! # let block = list.alloc(0)?;
+//!
+//! // data_start is pure — no I/O, no Result.
+//! let start: u64 = block.data_start();
+//! // data_end reads the 4-byte data_len field.
+//! let end: u64 = list.data_end(block)?;
+//!
+//! // One pread directly into a caller-owned buffer; no CRC, no allocation.
+//! let mut buf = vec![0u8; (end - start) as usize];
+//! list.bstack().get_into(start, &mut buf)?;
+//!
+//! // Or stream a sub-range into an existing buffer:
+//! # let mut frame = vec![0u8; 64];
+//! # let frame_offset = 0usize;
+//! list.bstack().get_into(start, &mut frame[frame_offset..])?;
+//! # Ok::<(), bllist::Error>(())
+//! ```
+//!
+//! **Only read-only BStack operations are safe** (`get`, `get_into`, `peek`,
+//! `len`).  Never call `push`, `pop`, or `set` on the handle returned by
+//! [`bstack()`](DynamicBlockList::bstack) — doing so can silently corrupt the
+//! list structure.  Use [`read`](DynamicBlockList::read) or
+//! [`read_into`](DynamicBlockList::read_into) when CRC verification matters.
+//!
 //! ## Direct file access — use with extreme caution
 //!
 //! Both list types produce valid BStack files, so you can open them with

@@ -206,9 +206,9 @@ list.bstack().get_into(start, &mut frame[offset..])?;
 │  "BSTK" magic + clen     │  "BLLD" + version + root + bin_heads[32]      │
 ├──────────────────────────┴───────────────────────────────────────────────┤
 │  Block (total size = 2^k bytes, k ≥ 5)                                   │
-│  checksum(4) │ next(8) │ block_size(4) │ data_len(4) │ payload(bs-20 B) │
+│  checksum(4) │ next(8) │ block_size(4) │ data_len(4) │ payload(bs-20 B)  │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  Block …                                                                  │
+│  Block …                                                                 │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 

@@ -37,7 +37,8 @@
 //! ```no_run
 //! use bllist::DynamicBlockList;
 //!
-//! // Blocks are sized to the next power of two automatically.
+//! // The total on-disk block size (header + payload) is a power of two.
+//! // A 5-byte push occupies 32 bytes on disk (5+20=25 → 32, bin 5).
 //! let list = DynamicBlockList::open("data.blld")?;
 //!
 //! list.push_front(b"short")?;
@@ -61,7 +62,7 @@
 //! │  Block 0  (PAYLOAD_CAPACITY+12 bytes, logical offset 24)             │
 //! │  checksum(4) │ next(8) │ payload(PAYLOAD_CAPACITY)                   │
 //! ├──────────────────────────────────────────────────────────────────────┤
-//! │  Block 1  …                                                           │
+//! │  Block 1  …                                                          │
 //! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -72,12 +73,17 @@
 //! │  BStack header (16 B)    │  bllist-dynamic header (272 B, logical off 0) │
 //! │  "BSTK" magic + clen     │  "BLLD" + version + root + bin_heads[32]      │
 //! ├──────────────────────────┴───────────────────────────────────────────────┤
-//! │  Block (variable size)                                                    │
-//! │  checksum(4) │ next(8) │ capacity(4) │ data_len(4) │ payload(capacity B) │
+//! │  Block (total size = 2^k bytes, k ≥ 5)                                   │
+//! │  checksum(4) │ next(8) │ block_size(4) │ data_len(4) │ payload(bs-20 B)  │
 //! ├──────────────────────────────────────────────────────────────────────────┤
-//! │  Block …                                                                  │
+//! │  Block …                                                                 │
 //! └──────────────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! Bin *k* holds free blocks whose **total** on-disk size equals 2^*k* bytes.
+//! The minimum block is bin 5 (32 bytes total, 12-byte payload).  Large free
+//! blocks may be split to satisfy smaller requests; adjacent free blocks may
+//! be coalesced on open.
 //!
 //! The BStack header is managed transparently by the [`bstack`] crate;
 //! callers only see logical offsets starting at 0.

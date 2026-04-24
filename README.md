@@ -15,7 +15,9 @@ Durable, crash-safe, checksummed block-based linked list allocators stored in a 
 - **Two allocator types** — `FixedBlockList` for uniform records, `DynamicBlockList` for variable-size records with bin-based reuse
 - **CRC32 integrity** — every block is checksummed; corruption is detected on read
 - **Crash safety** — all mutations are durable before returning; orphaned blocks are recovered on the next `open`
-- **Bin-based free list** — freed blocks are returned to the power-of-two bin matching their capacity and reused immediately
+- **Power-of-two block sizes** — dynamic blocks have a total on-disk footprint (header + payload) that is always a power of two, enabling splitting and coalescing
+- **Splitting** — when a free block is larger than needed (within `MAX_SPLIT` = 3 levels), it is halved and the spare half returned to its bin, reducing wasted space
+- **Coalescing on open** — adjacent free blocks whose combined size is a power of two are merged into a single larger block, fighting long-term fragmentation
 - **Zero-copy reads** — `read_into` and `pop_front_into` fill a caller-supplied buffer directly from the file
 - **Thread-safe** — `Send + Sync`; concurrent reads are efficient via `pread` on Unix/Windows
 - **Valid BStack files** — both list types produce valid `bstack` files; the BStack header and crash-recovery semantics are inherited for free
@@ -59,7 +61,8 @@ fn main() -> Result<(), bllist::Error> {
 use bllist::DynamicBlockList;
 
 fn main() -> Result<(), bllist::Error> {
-    // Payload capacity is rounded up to the next power of two per block.
+    // The total on-disk block size (header + payload) is a power of two.
+    // A 5-byte push occupies 32 bytes on disk (5+20=25 → 32, bin 5).
     let list = DynamicBlockList::open("data.blld")?;
 
     list.push_front(b"short")?;
@@ -103,15 +106,15 @@ A `Copy` handle encoding a block's logical byte offset in the BStack file. Treat
 
 ### `DynamicBlockList`
 
-Blocks may hold any payload up to 2^31 bytes. Each allocation is rounded up to the next power of two (minimum 1) and served from one of 32 power-of-two bins. Freed blocks return to their bin and are reused by the next allocation of the same size.
+Blocks may hold any payload up to 2^31 − 20 bytes.  The **total on-disk footprint** of a block (20-byte header + payload) is always a power of two, with a minimum of 32 bytes (bin 5, 12-byte payload).  Allocation first checks the exact power-of-two bin, then searches up to `MAX_SPLIT` = 3 bins higher and splits if found, and finally extends the file.  On open, adjacent free blocks whose combined size is a power of two are coalesced.
 
 | Method | Description |
 |--------|-------------|
-| `open(path)` | Open or create; performs crash recovery |
+| `open(path)` | Open or create; validates header; coalesces free blocks and recovers orphans |
 | `push_front(data)` | Allocate, write, and prepend to the list |
 | `pop_front()` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
 | `pop_front_into(buf)` → `bool` | Zero-copy pop into caller buffer |
-| `alloc(size)` → `DynBlockRef` | Allocate a block with capacity ≥ `size` |
+| `alloc(size)` → `DynBlockRef` | Allocate block; splits from larger bin or extends file |
 | `free(block)` | Return a block to its bin |
 | `write(block, data)` | Write payload, update `data_len` |
 | `read(block)` → `Vec<u8>` | Read `data_len` bytes, checksum-verify |
@@ -119,9 +122,9 @@ Blocks may hold any payload up to 2^31 bytes. Each allocation is rounded up to t
 | `set_next(block, next)` | Update next pointer, preserve payload |
 | `get_next(block)` → `Option<DynBlockRef>` | Read next pointer (no CRC check) |
 | `root()` → `Option<DynBlockRef>` | Current head of the active list |
-| `capacity(block)` → `usize` | Allocated payload capacity (power of two) |
+| `capacity(block)` → `usize` | Payload capacity = `block_size − 20` |
 | `data_len(block)` → `usize` | Bytes last written to this block |
-| `capacity_for(size)` → `usize` | Next power of two ≥ `size` |
+| `block_size_for(size)` → `usize` | Smallest power-of-two total size ≥ `size + 20` (min 32) |
 
 ### `DynBlockRef`
 
@@ -156,15 +159,16 @@ A `Copy` handle encoding a dynamic block's logical byte offset. Analogous to `Bl
 │  BStack header (16 B)    │  bllist-dynamic header (272 B, logical off 0) │
 │  "BSTK" magic + clen     │  "BLLD" + version + root + bin_heads[32]      │
 ├──────────────────────────┴───────────────────────────────────────────────┤
-│  Block (variable size)                                                    │
-│  checksum(4) │ next(8) │ capacity(4) │ data_len(4) │ payload(capacity B) │
+│  Block (total size = 2^k bytes, k ≥ 5)                                   │
+│  checksum(4) │ next(8) │ block_size(4) │ data_len(4) │ payload(bs-20 B) │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Block …                                                                  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The **bllist-dynamic header** stores the root offset and 32 bin free-list heads (one per power-of-two capacity 2^0–2^31).
-- The **block checksum** covers bytes `[4..20+capacity]` (next + capacity + data_len + full payload field).
+- The **bllist-dynamic header** stores the root offset and 32 bin free-list heads. Bin *k* holds free blocks whose **total on-disk size** equals 2^*k* bytes (bins 0–4 are always empty; minimum is bin 5 = 32 bytes).
+- The **`block_size` field** stores the total on-disk size of the block (header + payload), always a power of two (≥ 32). Payload capacity = `block_size − 20`.
+- The **block checksum** covers bytes `[4..block_size]` (next + block_size + data_len + full payload field, including zero-padded tail).
 - `data_len` records how many bytes were written; bytes beyond it are guaranteed to be zero.
 
 ---
@@ -194,9 +198,13 @@ No data that was fully committed (root updated) is ever lost.
 |---|---|---|
 | Record size | Always the same | Varies |
 | On-disk overhead per block | 12 bytes | 20 bytes |
+| Block size on disk | `PAYLOAD_CAPACITY + 12` | Power of two ≥ `payload + 20` (min 32) |
 | Free list | Single flat list | 32 power-of-two bins |
-| Orphan scan | O(n) slot enumeration | O(n) sequential scan |
+| Splitting | No | Up to `MAX_SPLIT` = 3 levels above target bin |
+| Coalescing on open | No | Adjacent free blocks merged when sum is power of two |
+| Orphan scan | O(n) slot enumeration | O(n) sequential scan + rebuild |
 | File magic | `"BLLS"` | `"BLLD"` |
+| On-disk format version | 1 | 2 |
 
 ### Choosing `PAYLOAD_CAPACITY` for `FixedBlockList`
 

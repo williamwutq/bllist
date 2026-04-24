@@ -7,6 +7,46 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.2.0] - 2026-04-24
+
+### Changed
+
+- **`DynamicBlockList` on-disk format bumped to version 2** (breaking — existing
+  `.blld` version-1 files are rejected with `Error::Corruption` on open).
+  The `capacity` field in every block header is replaced by `block_size`: the
+  **total** on-disk size of the block (header + payload), always a power of two
+  and at least 32 bytes.  The payload capacity is therefore `block_size − 20`
+  rather than the value stored verbatim.
+- **Bin semantics changed**: bin *k* now holds free blocks whose total on-disk
+  size equals 2^*k*.  Bins 0–4 are never populated; the minimum usable bin is
+  5 (32-byte blocks, 12-byte payload).  Previously bin *k* held blocks whose
+  *payload capacity* equalled 2^*k*.
+- **`capacity_for(size)` replaced by `block_size_for(size)`**: returns the
+  smallest power-of-two total block size ≥ `size + 20`, with a minimum of 32.
+- **`capacity(block)` semantics unchanged** (returns payload capacity in bytes)
+  but internally computes `block_size − 20` instead of reading a stored value.
+
+### Added
+
+- **`MIN_BIN`** (`= 5`) — public constant for the smallest usable bin index.
+- **`MAX_SPLIT`** (`= 3`) — public constant controlling the maximum number of
+  bin levels searched above the target before the file is extended.
+- **Splitting on allocation**: when the target bin is empty, `alloc` searches
+  bins *k+1* through *k+`MAX_SPLIT`* for a free block.  If one is found at
+  bin *m*, it is split by halving repeatedly — the upper half is placed in
+  bin *m−1*, *m−2*, … until the lower half reaches the target bin.  The lower
+  half's `block_size` field is updated first on each split step so the
+  sequential scan remains consistent if a crash occurs mid-split.
+- **Coalescing on open** (`recover_orphans`): after collecting all non-active
+  blocks via sequential scan, adjacent free blocks whose combined size is a
+  power of two are merged into a single block (one pass).  This handles runs of
+  any length — e.g. three adjacent blocks of 256 + 512 + 256 = 1024 bytes merge
+  into a single bin-10 block.  All bin free-lists are rebuilt from scratch using
+  a two-phase header write (zero all bin heads first, then populate) so a crash
+  mid-coalesce leaves only orphans that are safely reclaimed on the next open.
+
+---
+
 ## [0.1.0] - 2026-04-21
 
 ### Added

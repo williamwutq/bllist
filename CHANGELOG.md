@@ -44,6 +44,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   into a single bin-10 block.  All bin free-lists are rebuilt from scratch using
   a two-phase header write (zero all bin heads first, then populate) so a crash
   mid-coalesce leaves only orphans that are safely reclaimed on the next open.
+- **`DynBlockRef::data_start(self) -> u64`** — pure, infallible method on the
+  ref itself; returns the logical byte offset of the first payload byte
+  (`self.0 + 20`).  No file access or validation.
+- **`DynamicBlockList::data_start(block) -> Result<u64, Error>`** — validates
+  the block offset then returns the same value as `block.data_start()`.
+  Consistent with the rest of the metadata API (`capacity`, `data_len`).
+- **`DynamicBlockList::data_end(block) -> Result<u64, Error>`** — validates the
+  offset, reads `data_len` from the file, and returns
+  `block.data_start() + data_len`.  Equals `data_start` for an empty block.
 
 ---
 

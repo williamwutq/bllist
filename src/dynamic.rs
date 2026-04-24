@@ -242,6 +242,20 @@ impl From<DynBlockRef> for u64 {
     }
 }
 
+impl DynBlockRef {
+    /// Return the logical byte offset of the first payload byte for this block.
+    ///
+    /// This is a pure computation: `self.0 + 20` (the 20-byte block header
+    /// always precedes the payload).  No file access or validation is performed.
+    ///
+    /// For the offset past the last *written* byte (respecting `data_len`), use
+    /// [`DynamicBlockList::data_end`].
+    #[inline]
+    pub fn data_start(self) -> u64 {
+        self.0 + BLOCK_HEADER_SIZE as u64
+    }
+}
+
 // ── DynamicBlockList ──────────────────────────────────────────────────────────
 
 /// A durable, crash-safe singly-linked list of variable-size blocks backed by
@@ -640,6 +654,41 @@ impl DynamicBlockList {
         let mut buf = [0u8; 4];
         self.stack.get_into(block.0 + 16, &mut buf)?;
         Ok(u32::from_le_bytes(buf) as usize)
+    }
+
+    /// Return the logical byte offset of the first payload byte of `block`.
+    ///
+    /// Equivalent to [`DynBlockRef::data_start`] but also validates that
+    /// `block` is a legal block offset (i.e. not inside the file header).
+    ///
+    /// Does not read from the file beyond the offset check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBlock`] if `block` points into the header region.
+    pub fn data_start(&self, block: DynBlockRef) -> Result<u64, Error> {
+        self.validate_block_offset(block.0)?;
+        Ok(block.data_start())
+    }
+
+    /// Return the logical byte offset one past the last written payload byte of
+    /// `block`.
+    ///
+    /// Reads `data_len` from the file and returns
+    /// `block.data_start() + data_len`.  If the block is empty (`data_len = 0`)
+    /// this equals [`data_start`](Self::data_start).
+    ///
+    /// Does not verify the checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBlock`] or [`Error::Io`].
+    pub fn data_end(&self, block: DynBlockRef) -> Result<u64, Error> {
+        self.validate_block_offset(block.0)?;
+        let mut buf = [0u8; 4];
+        self.stack.get_into(block.0 + 16, &mut buf)?;
+        let data_len = u32::from_le_bytes(buf) as u64;
+        Ok(block.data_start() + data_len)
     }
 
     // ── convenience list operations ───────────────────────────────────────────

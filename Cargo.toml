@@ -11,6 +11,13 @@ repository = "https://github.com/williamwutq/bllist"
 documentation = "https://docs.rs/bllist"
 keywords = ["list", "persistent", "file-backed", "database", "binary"]
 
+[features]
+async = ["dep:tokio"]
+
 [dependencies]
 bstack = { version = ">=0.1.3", features = ["set"] }
 crc32fast = "1.5"
+tokio = { version = "1", features = ["rt"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

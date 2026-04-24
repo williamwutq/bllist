@@ -165,6 +165,16 @@ pub mod dynamic;
 pub mod error;
 pub mod fixed;
 
+#[cfg(feature = "async")]
+pub mod async_dynamic;
+#[cfg(feature = "async")]
+pub mod async_fixed;
+
 pub use dynamic::{DynBlockRef, DynamicBlockList};
 pub use error::Error;
 pub use fixed::{BlockRef, FixedBlockList};
+
+#[cfg(feature = "async")]
+pub use async_dynamic::AsyncDynamicBlockList;
+#[cfg(feature = "async")]
+pub use async_fixed::AsyncFixedBlockList;

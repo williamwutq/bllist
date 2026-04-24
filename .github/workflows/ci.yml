@@ -32,3 +32,7 @@ jobs:
       run: cargo test
     - name: Test Release
       run: cargo test --release
+    - name: Test with Features
+      run: cargo test --features async
+    - name: Test Release with Features
+      run: cargo test --release --features async

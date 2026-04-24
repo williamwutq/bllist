@@ -1163,6 +1163,69 @@ impl DynamicBlockList {
     }
 }
 
+// ── DynIter ───────────────────────────────────────────────────────────────────
+
+/// An iterator over the blocks of a [`DynamicBlockList`].
+///
+/// Each call to [`next`](Iterator::next) reads one block's payload (with
+/// checksum verification) and advances to the following block.  The iterator
+/// holds a shared reference to the list so the list may not be mutated while
+/// iteration is ongoing.
+///
+/// Iteration stops cleanly when the end of the list is reached, or
+/// immediately after yielding an `Err` if a read fails.
+///
+/// Obtain one by calling [`DynamicBlockList::iter`].
+pub struct DynIter<'a> {
+    list: &'a DynamicBlockList,
+    current: Option<DynBlockRef>,
+}
+
+impl<'a> Iterator for DynIter<'a> {
+    type Item = Result<Vec<u8>, crate::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let block = self.current?;
+        // Advance before reading so that on error the iterator terminates.
+        self.current = match self.list.get_next(block) {
+            Ok(next) => next,
+            Err(e) => {
+                self.current = None;
+                return Some(Err(e));
+            }
+        };
+        Some(self.list.read(block))
+    }
+}
+
+impl DynamicBlockList {
+    /// Return an iterator over every block in the active list from head to tail.
+    ///
+    /// Each item is `Result<Vec<u8>, Error>` where the `Vec` contains exactly
+    /// the bytes written to that block.
+    /// The iterator stops after the first error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bllist::DynamicBlockList;
+    ///
+    /// let list = DynamicBlockList::open("data.blld")?;
+    /// for item in list.iter()? {
+    ///     let payload = item?;
+    ///     println!("{}", String::from_utf8_lossy(&payload));
+    /// }
+    /// # Ok::<(), bllist::Error>(())
+    /// ```
+    pub fn iter(&self) -> Result<DynIter<'_>, crate::Error> {
+        let current = self.root()?;
+        Ok(DynIter {
+            list: self,
+            current,
+        })
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -224,9 +224,9 @@ pub mod async_dynamic;
 #[cfg(feature = "async")]
 pub mod async_fixed;
 
-pub use dynamic::{DynBlockRef, DynamicBlockList};
+pub use dynamic::{DynBlockRef, DynIter, DynamicBlockList};
 pub use error::Error;
-pub use fixed::{BlockRef, FixedBlockList};
+pub use fixed::{BlockRef, FixedBlockList, FixedIter};
 
 #[cfg(feature = "async")]
 pub use async_dynamic::AsyncDynamicBlockList;

@@ -713,6 +713,69 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     }
 }
 
+// ── FixedIter ─────────────────────────────────────────────────────────────────
+
+/// An iterator over the blocks of a [`FixedBlockList`].
+///
+/// Each call to [`next`](Iterator::next) reads one block's payload (with
+/// checksum verification) and advances to the following block.  The iterator
+/// holds a shared reference to the list so the list may not be mutated while
+/// iteration is ongoing.
+///
+/// Iteration stops cleanly when the end of the list is reached, or
+/// immediately after yielding an `Err` if a read fails.
+///
+/// Obtain one by calling [`FixedBlockList::iter`].
+pub struct FixedIter<'a, const PAYLOAD_CAPACITY: usize> {
+    list: &'a FixedBlockList<PAYLOAD_CAPACITY>,
+    current: Option<BlockRef>,
+}
+
+impl<'a, const PAYLOAD_CAPACITY: usize> Iterator for FixedIter<'a, PAYLOAD_CAPACITY> {
+    type Item = Result<Vec<u8>, crate::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let block = self.current?;
+        // Advance before reading so that on error the iterator terminates.
+        self.current = match self.list.get_next(block) {
+            Ok(next) => next,
+            Err(e) => {
+                self.current = None;
+                return Some(Err(e));
+            }
+        };
+        Some(self.list.read(block))
+    }
+}
+
+impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
+    /// Return an iterator over every block in the active list from head to tail.
+    ///
+    /// Each item is `Result<Vec<u8>, Error>` where the `Vec` is always
+    /// `PAYLOAD_CAPACITY` bytes long (zero-padded beyond the last write).
+    /// The iterator stops after the first error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bllist::FixedBlockList;
+    ///
+    /// let list = FixedBlockList::<52>::open("data.blls")?;
+    /// for item in list.iter()? {
+    ///     let payload = item?;
+    ///     println!("{}", String::from_utf8_lossy(&payload));
+    /// }
+    /// # Ok::<(), bllist::Error>(())
+    /// ```
+    pub fn iter(&self) -> Result<FixedIter<'_, PAYLOAD_CAPACITY>, crate::Error> {
+        let current = self.root()?;
+        Ok(FixedIter {
+            list: self,
+            current,
+        })
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

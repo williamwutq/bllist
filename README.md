@@ -124,11 +124,18 @@ Blocks may hold any payload up to 2^31 − 20 bytes.  The **total on-disk footpr
 | `root()` → `Option<DynBlockRef>` | Current head of the active list |
 | `capacity(block)` → `usize` | Payload capacity = `block_size − 20` |
 | `data_len(block)` → `usize` | Bytes last written to this block |
+| `data_start(block)` → `u64` | Logical offset of first payload byte (validates offset) |
+| `data_end(block)` → `u64` | Logical offset past the last written byte (reads `data_len`) |
+| `bstack()` → `&BStack` | Underlying file handle for raw read-only streaming |
 | `block_size_for(size)` → `usize` | Smallest power-of-two total size ≥ `size + 20` (min 32) |
 
 ### `DynBlockRef`
 
 A `Copy` handle encoding a dynamic block's logical byte offset. Analogous to `BlockRef` but for `DynamicBlockList`.
+
+| Method | Description |
+|--------|-------------|
+| `data_start()` → `u64` | Logical offset of the first payload byte (`self.0 + 20`); pure, no I/O |
 
 ---
 

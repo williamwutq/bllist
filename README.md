@@ -113,21 +113,21 @@ file handle, so you can hand copies to multiple tasks without reopening the file
 
 `PAYLOAD_CAPACITY` is the number of **payload bytes** per block. Each block occupies `PAYLOAD_CAPACITY + 12` bytes on disk. `PAYLOAD_CAPACITY` must be `> 0`; a value of `0` is rejected at compile time.
 
-| Method | Description |
-|--------|-------------|
-| `open(path)` | Open or create; performs crash recovery |
-| `push_front(data)` | Allocate, write, and prepend to the list |
-| `pop_front()` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
-| `pop_front_into(buf)` → `bool` | Zero-copy pop into caller buffer |
-| `alloc()` → `BlockRef` | Allocate a raw block (from free list or new) |
-| `free(block)` | Return a block to the free list |
-| `write(block, data)` | Write payload, preserve next pointer |
-| `read(block)` → `Vec<u8>` | Read and checksum-verify payload |
-| `read_into(block, buf)` | Zero-copy read into caller buffer |
-| `set_next(block, next)` | Update next pointer, preserve payload |
-| `get_next(block)` → `Option<BlockRef>` | Read next pointer (no CRC check) |
-| `root()` → `Option<BlockRef>` | Current head of the active list |
-| `payload_capacity()` | `PAYLOAD_CAPACITY` |
+| Method                                 | Description                                  |
+|----------------------------------------|----------------------------------------------|
+| `open(path)`                           | Open or create; performs crash recovery      |
+| `push_front(data)`                     | Allocate, write, and prepend to the list     |
+| `pop_front()` → `Option<Vec<u8>>`      | Unlink head, read payload, free block        |
+| `pop_front_into(buf)` → `bool`         | Zero-copy pop into caller buffer             |
+| `alloc()` → `BlockRef`                 | Allocate a raw block (from free list or new) |
+| `free(block)`                          | Return a block to the free list              |
+| `write(block, data)`                   | Write payload, preserve next pointer         |
+| `read(block)` → `Vec<u8>`              | Read and checksum-verify payload             |
+| `read_into(block, buf)`                | Zero-copy read into caller buffer            |
+| `set_next(block, next)`                | Update next pointer, preserve payload        |
+| `get_next(block)` → `Option<BlockRef>` | Read next pointer (no CRC check)             |
+| `root()` → `Option<BlockRef>`          | Current head of the active list              |
+| `payload_capacity()`                   | `PAYLOAD_CAPACITY`                           |
 
 ### `BlockRef`
 
@@ -137,33 +137,33 @@ A `Copy` handle encoding a block's logical byte offset in the BStack file. Treat
 
 Blocks may hold any payload up to 2^31 − 20 bytes.  The **total on-disk footprint** of a block (20-byte header + payload) is always a power of two, with a minimum of 32 bytes (bin 5, 12-byte payload).  Allocation first checks the exact power-of-two bin, then searches up to `MAX_SPLIT` = 3 bins higher and splits if found, and finally extends the file.  On open, adjacent free blocks whose combined size is a power of two are coalesced.
 
-| Method | Description |
-|--------|-------------|
-| `open(path)` | Open or create; validates header; coalesces free blocks and recovers orphans |
-| `push_front(data)` | Allocate, write, and prepend to the list |
-| `pop_front()` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
-| `pop_front_into(buf)` → `bool` | Zero-copy pop into caller buffer |
-| `alloc(size)` → `DynBlockRef` | Allocate block; splits from larger bin or extends file |
-| `free(block)` | Return a block to its bin |
-| `write(block, data)` | Write payload, update `data_len` |
-| `read(block)` → `Vec<u8>` | Read `data_len` bytes, checksum-verify |
-| `read_into(block, buf)` | Zero-copy read into caller buffer |
-| `set_next(block, next)` | Update next pointer, preserve payload |
-| `get_next(block)` → `Option<DynBlockRef>` | Read next pointer (no CRC check) |
-| `root()` → `Option<DynBlockRef>` | Current head of the active list |
-| `capacity(block)` → `usize` | Payload capacity = `block_size − 20` |
-| `data_len(block)` → `usize` | Bytes last written to this block |
-| `data_start(block)` → `u64` | Logical offset of first payload byte (validates offset) |
-| `data_end(block)` → `u64` | Logical offset past the last written byte (reads `data_len`) |
-| `bstack()` → `&BStack` | Underlying file handle for raw read-only streaming |
-| `block_size_for(size)` → `usize` | Smallest power-of-two total size ≥ `size + 20` (min 32) |
+| Method                                    | Description                                                                  |
+|-------------------------------------------|------------------------------------------------------------------------------|
+| `open(path)`                              | Open or create; validates header; coalesces free blocks and recovers orphans |
+| `push_front(data)`                        | Allocate, write, and prepend to the list                                     |
+| `pop_front()` → `Option<Vec<u8>>`         | Unlink head, read payload, free block                                        |
+| `pop_front_into(buf)` → `bool`            | Zero-copy pop into caller buffer                                             |
+| `alloc(size)` → `DynBlockRef`             | Allocate block; splits from larger bin or extends file                       |
+| `free(block)`                             | Return a block to its bin                                                    |
+| `write(block, data)`                      | Write payload, update `data_len`                                             |
+| `read(block)` → `Vec<u8>`                 | Read `data_len` bytes, checksum-verify                                       |
+| `read_into(block, buf)`                   | Zero-copy read into caller buffer                                            |
+| `set_next(block, next)`                   | Update next pointer, preserve payload                                        |
+| `get_next(block)` → `Option<DynBlockRef>` | Read next pointer (no CRC check)                                             |
+| `root()` → `Option<DynBlockRef>`          | Current head of the active list                                              |
+| `capacity(block)` → `usize`               | Payload capacity = `block_size − 20`                                         |
+| `data_len(block)` → `usize`               | Bytes last written to this block                                             |
+| `data_start(block)` → `u64`               | Logical offset of first payload byte (validates offset)                      |
+| `data_end(block)` → `u64`                 | Logical offset past the last written byte (reads `data_len`)                 |
+| `bstack()` → `&BStack`                    | Underlying file handle for raw read-only streaming                           |
+| `block_size_for(size)` → `usize`          | Smallest power-of-two total size ≥ `size + 20` (min 32)                      |
 
 ### `DynBlockRef`
 
 A `Copy` handle encoding a dynamic block's logical byte offset. Analogous to `BlockRef` but for `DynamicBlockList`.
 
-| Method | Description |
-|--------|-------------|
+| Method                 | Description                                                            |
+|------------------------|------------------------------------------------------------------------|
 | `data_start()` → `u64` | Logical offset of the first payload byte (`self.0 + 20`); pure, no I/O |
 
 ### `AsyncFixedBlockList<PAYLOAD_CAPACITY>` *(feature `async`)*
@@ -172,43 +172,43 @@ An async, `Clone`-able wrapper around `FixedBlockList`. Each method runs on
 Tokio's blocking-thread pool via `spawn_blocking`.  Data inputs accept any
 `impl AsRef<[u8]> + Send + 'static` (e.g. `Vec<u8>`, `Box<[u8]>`, `&'static [u8]`).
 
-| Method | Description |
-|--------|-------------|
-| `open(path).await` | Open or create on a blocking thread |
-| `push_front(data).await` | Allocate, write, prepend to list |
-| `pop_front().await` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
-| `alloc().await` → `BlockRef` | Allocate a raw block |
-| `free(block).await` | Return block to free list |
-| `write(block, data).await` | Write payload, preserve next pointer |
-| `read(block).await` → `Vec<u8>` | Read and checksum-verify payload |
-| `set_next(block, next).await` | Update next pointer |
-| `get_next(block).await` → `Option<BlockRef>` | Read next pointer (no CRC check) |
-| `root().await` → `Option<BlockRef>` | Current head of the active list |
-| `payload_capacity()` | `PAYLOAD_CAPACITY` (no I/O) |
-| `inner()` → `&FixedBlockList<N>` | Underlying sync handle for streaming reads |
+| Method                                       | Description                                |
+|----------------------------------------------|--------------------------------------------|
+| `open(path).await`                           | Open or create on a blocking thread        |
+| `push_front(data).await`                     | Allocate, write, prepend to list           |
+| `pop_front().await` → `Option<Vec<u8>>`      | Unlink head, read payload, free block      |
+| `alloc().await` → `BlockRef`                 | Allocate a raw block                       |
+| `free(block).await`                          | Return block to free list                  |
+| `write(block, data).await`                   | Write payload, preserve next pointer       |
+| `read(block).await` → `Vec<u8>`              | Read and checksum-verify payload           |
+| `set_next(block, next).await`                | Update next pointer                        |
+| `get_next(block).await` → `Option<BlockRef>` | Read next pointer (no CRC check)           |
+| `root().await` → `Option<BlockRef>`          | Current head of the active list            |
+| `payload_capacity()`                         | `PAYLOAD_CAPACITY` (no I/O)                |
+| `inner()` → `&FixedBlockList<N>`             | Underlying sync handle for streaming reads |
 
 ### `AsyncDynamicBlockList` *(feature `async`)*
 
 An async, `Clone`-able wrapper around `DynamicBlockList`. Same `spawn_blocking`
 approach as `AsyncFixedBlockList`.
 
-| Method | Description |
-|--------|-------------|
-| `open(path).await` | Open or create on a blocking thread |
-| `push_front(data).await` | Allocate, write, prepend to list |
-| `pop_front().await` → `Option<Vec<u8>>` | Unlink head, read payload, free block |
-| `alloc(size).await` → `DynBlockRef` | Allocate block; splits or extends file |
-| `free(block).await` | Return block to its bin |
-| `write(block, data).await` | Write payload, update `data_len` |
-| `read(block).await` → `Vec<u8>` | Read `data_len` bytes, checksum-verify |
-| `set_next(block, next).await` | Update next pointer |
-| `get_next(block).await` → `Option<DynBlockRef>` | Read next pointer (no CRC check) |
-| `root().await` → `Option<DynBlockRef>` | Current head of the active list |
-| `capacity(block).await` → `usize` | Payload capacity = `block_size − 20` |
-| `data_len(block).await` → `usize` | Bytes last written to this block |
-| `data_end(block).await` → `u64` | Logical offset past the last written byte |
-| `block_size_for(size)` | Smallest power-of-two total size ≥ `size + 20` (no I/O) |
-| `inner()` → `&DynamicBlockList` | Underlying sync handle for streaming reads |
+| Method                                          | Description                                             |
+|-------------------------------------------------|---------------------------------------------------------|
+| `open(path).await`                              | Open or create on a blocking thread                     |
+| `push_front(data).await`                        | Allocate, write, prepend to list                        |
+| `pop_front().await` → `Option<Vec<u8>>`         | Unlink head, read payload, free block                   |
+| `alloc(size).await` → `DynBlockRef`             | Allocate block; splits or extends file                  |
+| `free(block).await`                             | Return block to its bin                                 |
+| `write(block, data).await`                      | Write payload, update `data_len`                        |
+| `read(block).await` → `Vec<u8>`                 | Read `data_len` bytes, checksum-verify                  |
+| `set_next(block, next).await`                   | Update next pointer                                     |
+| `get_next(block).await` → `Option<DynBlockRef>` | Read next pointer (no CRC check)                        |
+| `root().await` → `Option<DynBlockRef>`          | Current head of the active list                         |
+| `capacity(block).await` → `usize`               | Payload capacity = `block_size − 20`                    |
+| `data_len(block).await` → `usize`               | Bytes last written to this block                        |
+| `data_end(block).await` → `u64`                 | Logical offset past the last written byte               |
+| `block_size_for(size)`                          | Smallest power-of-two total size ≥ `size + 20` (no I/O) |
+| `inner()` → `&DynamicBlockList`                 | Underlying sync handle for streaming reads              |
 
 ---
 
@@ -220,11 +220,11 @@ to hand a byte range to another layer (e.g. `sendfile`, a scatter-gather
 buffer, or an async runtime) — `DynamicBlockList` exposes three building
 blocks that let you issue a single raw read:
 
-| Building block | I/O cost | Returns |
-|---|---|---|
-| `block.data_start()` | none (pure arithmetic) | start of payload as `u64` |
-| `list.data_end(block)?` | 1 × 4-byte read (`data_len`) | one-past-end of written data as `u64` |
-| `list.bstack().get_into(start, buf)?` | 1 × `pread` of your chosen length | fills `buf` from the file |
+| Building block                        | I/O cost                          | Returns                               |
+|---------------------------------------|-----------------------------------|---------------------------------------|
+| `block.data_start()`                  | none (pure arithmetic)            | start of payload as `u64`             |
+| `list.data_end(block)?`               | 1 × 4-byte read (`data_len`)      | one-past-end of written data as `u64` |
+| `list.bstack().get_into(start, buf)?` | 1 × `pread` of your chosen length | fills `buf` from the file             |
 
 ```rust
 use bllist::DynamicBlockList;
@@ -301,11 +301,11 @@ list.bstack().get_into(start, &mut frame[offset..])?;
 
 On `open`, the file is scanned for *orphaned* blocks (allocated but not reachable from either the active list or any free list). They are silently reclaimed.
 
-| Crash point | Effect | Recovery |
-|---|---|---|
-| During `alloc` (file grow) | Block exists but is in no list | Reclaimed as orphan on next `open` |
-| After `alloc`, before `push_front` links it | Block written but root not updated | Reclaimed as orphan on next `open` |
-| After `pop_front` advances root, before `free` | Block exists but in no list | Reclaimed as orphan on next `open` |
+| Crash point                                    | Effect                             | Recovery                           |
+|------------------------------------------------|------------------------------------|------------------------------------|
+| During `alloc` (file grow)                     | Block exists but is in no list     | Reclaimed as orphan on next `open` |
+| After `alloc`, before `push_front` links it    | Block written but root not updated | Reclaimed as orphan on next `open` |
+| After `pop_front` advances root, before `free` | Block exists but in no list        | Reclaimed as orphan on next `open` |
 
 No data that was fully committed (root updated) is ever lost.
 
@@ -313,17 +313,17 @@ No data that was fully committed (root updated) is ever lost.
 
 ## Choosing the right type
 
-| | `FixedBlockList` | `DynamicBlockList` |
-|---|---|---|
-| Record size | Always the same | Varies |
-| On-disk overhead per block | 12 bytes | 20 bytes |
-| Block size on disk | `PAYLOAD_CAPACITY + 12` | Power of two ≥ `payload + 20` (min 32) |
-| Free list | Single flat list | 32 power-of-two bins |
-| Splitting | No | Up to `MAX_SPLIT` = 3 levels above target bin |
-| Coalescing on open | No | Adjacent free blocks merged when sum is power of two |
-| Orphan scan | O(n) slot enumeration | O(n) sequential scan + rebuild |
-| File magic | `"BLLS"` | `"BLLD"` |
-| On-disk format version | 1 | 2 |
+|                            | `FixedBlockList`        | `DynamicBlockList`                                   |
+|----------------------------|-------------------------|------------------------------------------------------|
+| Record size                | Always the same         | Varies                                               |
+| On-disk overhead per block | 12 bytes                | 20 bytes                                             |
+| Block size on disk         | `PAYLOAD_CAPACITY + 12` | Power of two ≥ `payload + 20` (min 32)               |
+| Free list                  | Single flat list        | 32 power-of-two bins                                 |
+| Splitting                  | No                      | Up to `MAX_SPLIT` = 3 levels above target bin        |
+| Coalescing on open         | No                      | Adjacent free blocks merged when sum is power of two |
+| Orphan scan                | O(n) slot enumeration   | O(n) sequential scan + rebuild                       |
+| File magic                 | `"BLLS"`                | `"BLLD"`                                             |
+| On-disk format version     | 1                       | 2                                                    |
 
 ### Choosing `PAYLOAD_CAPACITY` for `FixedBlockList`
 
@@ -345,13 +345,13 @@ much later — or not caught at all.
 
 Specific dangers:
 
-| Operation                          | Risk |
-|------------------------------------|------|
+| Operation                          | Risk                                                                                                  |
+|------------------------------------|-------------------------------------------------------------------------------------------------------|
 | `BStack::push`                     | Appends raw bytes that are not a complete, aligned block; breaks slot enumeration and orphan recovery |
-| `BStack::pop`                      | May truncate a block mid-stream or destroy the list header |
-| `BStack::set` at header offsets    | Overwrites root or free-list / bin-head pointers |
-| `BStack::set` inside a block       | Invalidates the block's CRC; `read` will return a checksum error |
-| Raw file writes (`write(2)`, etc.) | Bypasses the advisory lock entirely; any of the above, plus potential torn writes |
+| `BStack::pop`                      | May truncate a block mid-stream or destroy the list header                                            |
+| `BStack::set` at header offsets    | Overwrites root or free-list / bin-head pointers                                                      |
+| `BStack::set` inside a block       | Invalidates the block's CRC; `read` will return a checksum error                                      |
+| Raw file writes (`write(2)`, etc.) | Bypasses the advisory lock entirely; any of the above, plus potential torn writes                     |
 
 **The exclusive advisory lock** (`flock` on Unix, `LockFileEx` on Windows)
 held by a live list prevents a second process from opening the same file

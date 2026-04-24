@@ -11,6 +11,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **`FixedIter<'a, PAYLOAD_CAPACITY>`** — a forward iterator over a
+  `FixedBlockList`.  Obtain via `list.iter()?`; each item is
+  `Result<Vec<u8>, Error>` where the `Vec` is always `PAYLOAD_CAPACITY` bytes
+  long (zero-padded past the last write).  CRC is verified on every step.
+  Stops immediately after the first error.
+- **`DynIter<'a>`** — a forward iterator over a `DynamicBlockList`.  Obtain via
+  `list.iter()?`; each item is `Result<Vec<u8>, Error>` containing exactly the
+  bytes last written to that block.  CRC is verified on every step.  Stops
+  immediately after the first error.
+- Both iterator types are re-exported from the crate root (`bllist::FixedIter`,
+  `bllist::DynIter`).
 - **`async` feature flag** — opt-in Tokio integration; add
   `bllist = { version = "0.2", features = ["async"] }` to enable.
 - **`AsyncFixedBlockList<PAYLOAD_CAPACITY>`** — async wrapper around

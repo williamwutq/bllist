@@ -13,6 +13,7 @@ Durable, crash-safe, checksummed block-based linked list allocators stored in a 
 ## Features
 
 - **Two allocator types** — `FixedBlockList` for uniform records, `DynamicBlockList` for variable-size records with bin-based reuse
+- **Forward iterators** — `FixedIter` and `DynIter` traverse the active list from head to tail with CRC verification on every step; obtain via `list.iter()?`
 - **CRC32 integrity** — every block is checksummed; corruption is detected on read
 - **Crash safety** — all mutations are durable before returning; orphaned blocks are recovered on the next `open`
 - **Power-of-two block sizes** — dynamic blocks have a total on-disk footprint (header + payload) that is always a power of two, enabling splitting and coalescing
@@ -127,6 +128,7 @@ file handle, so you can hand copies to multiple tasks without reopening the file
 | `set_next(block, next)`                | Update next pointer, preserve payload        |
 | `get_next(block)` → `Option<BlockRef>` | Read next pointer (no CRC check)             |
 | `root()` → `Option<BlockRef>`          | Current head of the active list              |
+| `iter()` → `FixedIter<'_>`             | Forward iterator from head to tail           |
 | `payload_capacity()`                   | `PAYLOAD_CAPACITY`                           |
 
 ### `BlockRef`
@@ -156,6 +158,7 @@ Blocks may hold any payload up to 2^31 − 20 bytes.  The **total on-disk footpr
 | `data_start(block)` → `u64`               | Logical offset of first payload byte (validates offset)                      |
 | `data_end(block)` → `u64`                 | Logical offset past the last written byte (reads `data_len`)                 |
 | `bstack()` → `&BStack`                    | Underlying file handle for raw read-only streaming                           |
+| `iter()` → `DynIter<'_>`                  | Forward iterator from head to tail                                           |
 | `block_size_for(size)` → `usize`          | Smallest power-of-two total size ≥ `size + 20` (min 32)                      |
 
 ### `DynBlockRef`
@@ -166,11 +169,30 @@ A `Copy` handle encoding a dynamic block's logical byte offset. Analogous to `Bl
 |------------------------|------------------------------------------------------------------------|
 | `data_start()` → `u64` | Logical offset of the first payload byte (`self.0 + 20`); pure, no I/O |
 
+### `FixedIter<'a, PAYLOAD_CAPACITY>`
+
+A forward iterator over the active list of a `FixedBlockList`.  Obtained via
+`list.iter()?`.  Each item is `Result<Vec<u8>, Error>`; the `Vec` is always
+`PAYLOAD_CAPACITY` bytes long (zero-padded past the last write).  CRC is
+verified on every step; the iterator stops after the first error.
+
+### `DynIter<'a>`
+
+A forward iterator over the active list of a `DynamicBlockList`.  Obtained
+via `list.iter()?`.  Each item is `Result<Vec<u8>, Error>` containing exactly
+the bytes last written to that block.  CRC is verified on every step; the
+iterator stops after the first error.
+
 ### `AsyncFixedBlockList<PAYLOAD_CAPACITY>` *(feature `async`)*
 
 An async, `Clone`-able wrapper around `FixedBlockList`. Each method runs on
 Tokio's blocking-thread pool via `spawn_blocking`.  Data inputs accept any
 `impl AsRef<[u8]> + Send + 'static` (e.g. `Vec<u8>`, `Box<[u8]>`, `&'static [u8]`).
+
+> **No async iterator** — `spawn_blocking` requires `'static` closures, so a
+> streaming async iterator cannot hold a borrowed `&'a` reference to the inner
+> list across await points.  Use `list.inner().iter()?` to iterate
+> synchronously, or collect into a `Vec` inside one `spawn_blocking` block.
 
 | Method                                       | Description                                |
 |----------------------------------------------|--------------------------------------------|
@@ -209,6 +231,45 @@ approach as `AsyncFixedBlockList`.
 | `data_end(block).await` → `u64`                 | Logical offset past the last written byte               |
 | `block_size_for(size)`                          | Smallest power-of-two total size ≥ `size + 20` (no I/O) |
 | `inner()` → `&DynamicBlockList`                 | Underlying sync handle for streaming reads              |
+
+> **No async iterator** — `spawn_blocking` requires `'static` closures, so a
+> streaming async iterator cannot hold a borrowed `&'a` reference to the inner
+> list across await points.  Use `list.inner().iter()?` to iterate
+> synchronously, or collect into a `Vec` inside one `spawn_blocking` block.
+
+---
+
+## Traversal and iteration
+
+Both list types expose a forward iterator via `.iter()?`:
+
+```rust
+use bllist::FixedBlockList;
+
+let list = FixedBlockList::<52>::open("data.blls")?;
+for item in list.iter()? {
+    let payload = item?;          // Vec<u8>, always 52 bytes
+    println!("{}", String::from_utf8_lossy(&payload));
+}
+```
+
+```rust
+use bllist::DynamicBlockList;
+
+let list = DynamicBlockList::open("data.blld")?;
+for item in list.iter()? {
+    let payload = item?;          // Vec<u8>, exactly data_len bytes
+    println!("{}", String::from_utf8_lossy(&payload));
+}
+```
+
+`iter()` reads the current root once to seed the iterator; each subsequent
+`next()` issues one file read and one CRC verification.  The iterator holds a
+shared `&` reference to the list, preventing mutation while iteration is in
+progress.
+
+`DoubleEndedIterator` is not implemented — both list types are singly-linked,
+so backward traversal is not possible without first collecting all elements.
 
 ---
 

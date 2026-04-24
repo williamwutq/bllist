@@ -95,6 +95,50 @@
 //! *orphaned* block that is silently reclaimed the next time the file is
 //! opened.
 //!
+//! ## Traversal and iteration
+//!
+//! Both list types expose a forward iterator via `.iter()?`:
+//!
+//! ```no_run
+//! use bllist::FixedBlockList;
+//!
+//! let list = FixedBlockList::<52>::open("data.blls")?;
+//! for item in list.iter()? {
+//!     let payload = item?;         // Vec<u8>, always PAYLOAD_CAPACITY bytes
+//!     println!("{}", String::from_utf8_lossy(&payload));
+//! }
+//! # Ok::<(), bllist::Error>(())
+//! ```
+//!
+//! ```no_run
+//! use bllist::DynamicBlockList;
+//!
+//! let list = DynamicBlockList::open("data.blld")?;
+//! for item in list.iter()? {
+//!     let payload = item?;         // Vec<u8>, exactly data_len bytes
+//!     println!("{}", String::from_utf8_lossy(&payload));
+//! }
+//! # Ok::<(), bllist::Error>(())
+//! ```
+//!
+//! `iter()` reads the current root once to seed the iterator; each subsequent
+//! [`next`](Iterator::next) call issues one file read with CRC verification.
+//! The iterator holds a `&` reference to the list, preventing mutation during
+//! traversal.
+//!
+//! [`DoubleEndedIterator`] is **not** implemented — both list types are
+//! singly-linked, so backward traversal is not possible without first
+//! collecting all elements.
+//!
+//! ### Why the async wrappers have no iterator
+//!
+//! [`AsyncFixedBlockList`] and [`AsyncDynamicBlockList`] do not provide their
+//! own iterator types.  `tokio::task::spawn_blocking` requires `'static`
+//! closures, which means a streaming async iterator cannot hold a borrowed
+//! `&'a` reference to the inner list across `.await` points.  Use
+//! `list.inner().iter()?` to iterate synchronously inside a blocking context,
+//! or collect into a `Vec` inside a single `spawn_blocking` call.
+//!
 //! ## Async I/O *(feature `async`)*
 //!
 //! Enable with `features = ["async"]` in your `Cargo.toml`.  This adds two

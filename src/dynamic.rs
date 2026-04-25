@@ -51,7 +51,9 @@
 //!
 //! **Deallocation** (`free(block)`):
 //! 1. Read `block_size` from the block header.
-//! 2. Zero the payload, `data_len = 0`, link into bin log₂(`block_size`).
+//! 2. If the block is the last block in the file: pop it from the BStack
+//!    (shrinks the file) and return.
+//! 3. Otherwise: zero the payload, `data_len = 0`, link into bin log₂(`block_size`).
 //!
 //! ## Coalescing on open
 //!
@@ -303,7 +305,9 @@ impl DynBlockRef {
 /// 4. If nothing within `MAX_SPLIT` levels: extend the file.
 ///
 /// **Deallocation** (`free(block)`):
-/// Zero the payload and link into the bin matching the block's total size.
+/// If the block is the last block in the file, pop it from the BStack (shrinking
+/// the file).  Otherwise, zero the payload and link into the bin matching the
+/// block's total size.
 ///
 /// # Crash safety
 ///
@@ -456,8 +460,10 @@ impl DynamicBlockList {
 
     /// Return a block to the free list for its bin.
     ///
-    /// The block's payload is zeroed and `data_len` is set to 0 before it is
-    /// linked into the bin matching its total on-disk size.
+    /// If the block is the last block in the file it is popped from the
+    /// BStack, shrinking the file, and no free-list entry is written.
+    /// Otherwise the payload is zeroed, `data_len` is set to 0, and the
+    /// block is linked into the bin matching its total on-disk size.
     ///
     /// # Errors
     ///
@@ -968,6 +974,15 @@ impl DynamicBlockList {
         let mut bs_buf = [0u8; 4];
         self.stack.get_into(block.0 + 12, &mut bs_buf)?;
         let block_size = u32::from_le_bytes(bs_buf) as usize;
+        let total = self.stack.len()?;
+        if block.0 + block_size as u64 == total {
+            // TODO: once bstack releases a method similar to pop that does not
+            // return content, aim to use that instead; the performance impact currently
+            // should not be significant enough to require users to update their bstack version,
+            // which might be not desirable
+            let _ = self.stack.pop(block_size as u64)?;
+            return Ok(());
+        }
         let bin = bin_index(block_size);
         let old_bin_head = header.bin_heads[bin];
 
@@ -1377,6 +1392,8 @@ mod tests {
         // Alloc a bin-(5+MAX_SPLIT+1) block = bin-9 (block_size=512) and free it.
         let big = list.alloc(492).unwrap(); // 492+20=512, bin 9
         let big_off = big.0;
+        // Push an active block so big is not the last block in the file when freed.
+        let _wall = list.push_front(b"wall").unwrap();
         list.free(big).unwrap();
 
         // Alloc bin-5. Distance = 9-5 = 4 > MAX_SPLIT=3 → should extend file, not split.
@@ -1667,6 +1684,8 @@ mod tests {
             let b1 = list.alloc(1).unwrap();
             // They are adjacent (b0 at HEADER_SIZE, b1 at HEADER_SIZE+32).
             assert_eq!(b1.0, b0.0 + 32);
+            // Push an active wall block so neither b0 nor b1 is last when freed.
+            let _wall = list.push_front(b"wall").unwrap();
             // Free both → two adjacent bin-5 blocks in the file.
             list.free(b0).unwrap();
             list.free(b1).unwrap();
@@ -1695,6 +1714,8 @@ mod tests {
             // Verify adjacency.
             assert_eq!(b1.0, b0.0 + 256);
             assert_eq!(b2.0, b0.0 + 768);
+            // Push an active wall block so b2 is not the last block when freed.
+            let _wall = list.push_front(b"wall").unwrap();
             // Free all → 256+512+256 = 1024 = 2^10 → should coalesce.
             list.free(b0).unwrap();
             list.free(b1).unwrap();

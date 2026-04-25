@@ -19,6 +19,7 @@ Durable, crash-safe, checksummed block-based linked list allocators stored in a 
 - **Power-of-two block sizes** — dynamic blocks have a total on-disk footprint (header + payload) that is always a power of two, enabling splitting and coalescing
 - **Splitting** — when a free block is larger than needed (within `MAX_SPLIT` = 3 levels), it is halved and the spare half returned to its bin, reducing wasted space
 - **Coalescing on open** — adjacent free blocks whose combined size is a power of two are merged into a single larger block, fighting long-term fragmentation
+- **Tail-block shrink** — freeing the last block in the file pops it from the BStack instead of adding it to the free list, keeping the file compact in sequential push/pop workloads
 - **Zero-copy reads** — `read_into` and `pop_front_into` fill a caller-supplied buffer directly from the file
 - **Async I/O** — `AsyncFixedBlockList` and `AsyncDynamicBlockList` wrappers offload every blocking call to Tokio's thread pool; enable with `features = ["async"]`
 - **Thread-safe** — `Send + Sync`; concurrent reads are efficient via `pread` on Unix/Windows
@@ -382,6 +383,7 @@ No data that was fully committed (root updated) is ever lost.
 | Free list                  | Single flat list        | 32 power-of-two bins                                 |
 | Splitting                  | No                      | Up to `MAX_SPLIT` = 3 levels above target bin        |
 | Coalescing on open         | No                      | Adjacent free blocks merged when sum is power of two |
+| Tail-block shrink on free  | Yes                     | Yes                                                  |
 | Orphan scan                | O(n) slot enumeration   | O(n) sequential scan + rebuild                       |
 | File magic                 | `"BLLS"`                | `"BLLD"`                                             |
 | On-disk format version     | 1                       | 2                                                    |

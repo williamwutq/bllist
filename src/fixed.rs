@@ -294,9 +294,12 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
 
     /// Return `block` to the free list.
     ///
-    /// The block's payload is zeroed on disk before being linked into the free
-    /// list. After this call the [`BlockRef`] is invalid; reading from it will
-    /// likely return [`Error::ChecksumMismatch`] or stale data.
+    /// If the block is the last block in the file it is popped from the
+    /// BStack, shrinking the file, and no free-list entry is written.
+    /// Otherwise the block's payload is zeroed on disk before it is linked
+    /// into the free list. After this call the [`BlockRef`] is invalid;
+    /// reading from it will likely return [`Error::ChecksumMismatch`] or
+    /// stale data.
     pub fn free(&self, block: BlockRef) -> Result<(), Error> {
         self.validate_block_offset(block.0)?;
         let _g = self.mu.lock().unwrap();
@@ -561,6 +564,16 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     /// Free `block` by zeroing it, linking it into the free list, and
     /// updating `header.free_list_head`. Caller must hold `mu`.
     fn free_locked(&self, block: BlockRef, header: &mut Header) -> Result<(), Error> {
+        let block_size = (PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE) as u64;
+        let total = self.stack.len()?;
+        if block.0 + block_size == total {
+            // TODO: once bstack releases a method similar to pop that does not
+            // return content, aim to use that instead; the performance impact currently
+            // should not be significant enough to require users to update their bstack version,
+            // which might be not desirable
+            let _ = self.stack.pop(block_size)?;
+            return Ok(());
+        }
         Block::<FixedLayout>::new(block.0).write(
             &self.stack,
             &header.free_list_head.to_le_bytes(),

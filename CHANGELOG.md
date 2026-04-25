@@ -9,6 +9,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **Tail-block pop on `free`** — when the block being freed is the last block
+  in the file, it is now popped from the BStack (shrinking the file) instead
+  of being linked into the free list / bin.  This prevents unbounded file
+  growth in workloads where blocks are freed in reverse allocation order (e.g.
+  sequential push followed by sequential pop-to-empty).  Both
+  `FixedBlockList` and `DynamicBlockList` implement this optimisation.
+
 ### Added
 
 - **`FixedIter<'a, PAYLOAD_CAPACITY>`** — a forward iterator over a

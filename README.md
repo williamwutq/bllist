@@ -12,19 +12,20 @@ Durable, crash-safe, checksummed block-based linked list allocators stored in a 
 
 ## Features
 
-- **Two allocator types** — `FixedBlockList` for uniform records, `DynamicBlockList` for variable-size records with bin-based reuse
-- **Forward iterators** — `FixedIter` and `DynIter` traverse the active list from head to tail with CRC verification on every step; obtain via `list.iter()?`
+- **Four allocator types** — singly-linked (`FixedBlockList`, `DynamicBlockList`) and doubly-linked (`FixedDblList`, `DynamicDblList`) variants for fixed and variable-size records
+- **Bidirectional iteration** — `FixedDblIter` and `DynDblIter` implement `DoubleEndedIterator`, enabling forward, reverse (`.rev()`), and interleaved front/back traversal; the singly-linked variants provide forward-only `FixedIter` / `DynIter`
+- **O(1) push/pop at both ends** — doubly-linked types store a tail pointer and support `push_back` / `pop_back` in addition to `push_front` / `pop_front`
 - **CRC32 integrity** — every block is checksummed; corruption is detected on read
-- **Crash safety** — all mutations are durable before returning; orphaned blocks are recovered on the next `open`
-- **Power-of-two block sizes** — dynamic blocks have a total on-disk footprint (header + payload) that is always a power of two, enabling splitting and coalescing
+- **Crash safety** — all mutations are durable before returning; orphaned blocks are recovered on the next `open`; doubly-linked lists also rebuild the tail pointer on recovery
+- **Power-of-two block sizes** — dynamic blocks have a total on-disk footprint that is always a power of two, enabling splitting and coalescing
 - **Splitting** — when a free block is larger than needed (within `MAX_SPLIT` = 3 levels), it is halved and the spare half returned to its bin, reducing wasted space
 - **Coalescing on open** — adjacent free blocks whose combined size is a power of two are merged into a single larger block, fighting long-term fragmentation
 - **Tail-block shrink** — freeing the last block in the file pops it from the BStack instead of adding it to the free list, keeping the file compact in sequential push/pop workloads
-- **Zero-copy reads** — `read_into` and `pop_front_into` fill a caller-supplied buffer directly from the file
+- **Zero-copy reads** — `read_into`, `pop_front_into`, and `pop_back_into` fill a caller-supplied buffer directly from the file
 - **Async I/O** — `AsyncFixedBlockList` and `AsyncDynamicBlockList` wrappers offload every blocking call to Tokio's thread pool; enable with `features = ["async"]`
 - **Thread-safe** — `Send + Sync`; concurrent reads are efficient via `pread` on Unix/Windows
-- **Valid BStack files** — both list types produce valid `bstack` files; the BStack header and crash-recovery semantics are inherited for free
-- **Cross-type protection** — `FixedBlockList` and `DynamicBlockList` use different file magics (`"BLLS"` vs `"BLLD"`) and cannot open each other's files
+- **Valid BStack files** — all list types produce valid `bstack` files; the BStack header and crash-recovery semantics are inherited for free
+- **Cross-type protection** — all four list types use distinct file magics (`"BLLS"`, `"BLLD"`, `"BLDF"`, `"BLDD"`) and cannot open each other's files
 
 ---
 
@@ -77,6 +78,59 @@ fn main() -> Result<(), bllist::Error> {
     while let Some(data) = list.pop_front()? {
         println!("{}", String::from_utf8_lossy(&data));
     }
+
+    Ok(())
+}
+```
+
+### Doubly-linked fixed-size blocks
+
+```rust
+use bllist::FixedDblList;
+
+fn main() -> Result<(), bllist::Error> {
+    // 44 bytes of payload per block (64 bytes total on disk).
+    let list = FixedDblList::<44>::open("data.bldf")?;
+
+    // Queue: push to back, pop from front (FIFO).
+    list.push_back(b"task-1")?;
+    list.push_back(b"task-2")?;
+    list.push_back(b"task-3")?;
+
+    while let Some(data) = list.pop_front()? {
+        println!("{}", String::from_utf8_lossy(&data));
+    }
+    // prints "task-1", "task-2", "task-3"
+
+    // Or iterate in reverse using DoubleEndedIterator:
+    list.push_back(b"a")?;
+    list.push_back(b"b")?;
+    list.push_back(b"c")?;
+    for item in list.iter()?.rev() {
+        println!("{}", String::from_utf8_lossy(&item?));
+    }
+    // prints "c", "b", "a"
+
+    Ok(())
+}
+```
+
+### Doubly-linked variable-size blocks
+
+```rust
+use bllist::DynamicDblList;
+
+fn main() -> Result<(), bllist::Error> {
+    // block_size_for(size) = smallest power-of-two ≥ size+28 (28-byte header).
+    let list = DynamicDblList::open("data.bldd")?;
+
+    list.push_back(b"short")?;
+    list.push_back(b"a somewhat longer record")?;
+
+    // Bidirectional iteration:
+    let mut it = list.iter()?;
+    println!("{}", String::from_utf8_lossy(&it.next().unwrap()?));      // "short"
+    println!("{}", String::from_utf8_lossy(&it.next_back().unwrap()?)); // "a somewhat longer record"
 
     Ok(())
 }
@@ -184,6 +238,101 @@ via `list.iter()?`.  Each item is `Result<Vec<u8>, Error>` containing exactly
 the bytes last written to that block.  CRC is verified on every step; the
 iterator stops after the first error.
 
+---
+
+### `FixedDblList<PAYLOAD_CAPACITY>`
+
+`PAYLOAD_CAPACITY` must be `> 0`.  Each block occupies `PAYLOAD_CAPACITY + 20`
+bytes on disk (4-byte CRC + 8-byte `prev` + 8-byte `next` + payload).  The
+file header (32 bytes) stores `root`, `tail`, and `free_head`.
+
+| Method                                    | Description                                        |
+|-------------------------------------------|----------------------------------------------------|
+| `open(path)`                              | Open or create; recovers orphans and rebuilds tail |
+| `push_front(data)`                        | Allocate, write, and prepend to the list           |
+| `push_back(data)`                         | Allocate, write, and append to the list            |
+| `pop_front()` → `Option<Vec<u8>>`         | Unlink head, read payload, free block              |
+| `pop_back()` → `Option<Vec<u8>>`          | Unlink tail, read payload, free block              |
+| `pop_front_into(buf)` → `bool`            | Zero-copy pop from head into caller buffer         |
+| `pop_back_into(buf)` → `bool`             | Zero-copy pop from tail into caller buffer         |
+| `alloc()` → `BlockDblRef`                 | Allocate a raw block                               |
+| `free(block)`                             | Return a block to the free list                    |
+| `write(block, data)`                      | Write payload, preserve prev/next                  |
+| `read(block)` → `Vec<u8>`                 | Read and checksum-verify payload                   |
+| `read_into(block, buf)`                   | Zero-copy read into caller buffer                  |
+| `set_next(block, next)`                   | Update next pointer, preserve payload and prev     |
+| `set_prev(block, prev)`                   | Update prev pointer, preserve payload and next     |
+| `get_next(block)` → `Option<BlockDblRef>` | Read next pointer (no CRC check)                   |
+| `get_prev(block)` → `Option<BlockDblRef>` | Read prev pointer (no CRC check)                   |
+| `root()` → `Option<BlockDblRef>`          | Current head of the active list                    |
+| `tail()` → `Option<BlockDblRef>`          | Current tail of the active list                    |
+| `iter()` → `FixedDblIter<'_>`             | Double-ended iterator (forward and backward)       |
+| `payload_capacity()`                      | `PAYLOAD_CAPACITY`                                 |
+
+### `BlockDblRef`
+
+A `Copy` handle encoding a `FixedDblList` block's logical byte offset.  Same
+`Display` / `LowerHex` / `UpperHex` / `From` traits as `BlockRef`.
+
+### `FixedDblIter<'a, PAYLOAD_CAPACITY>`
+
+A double-ended iterator over the active list of a `FixedDblList`.  Obtained
+via `list.iter()?`.  Implements both `Iterator` (forward, head→tail) and
+`DoubleEndedIterator` (backward, tail→head).  When both cursors converge on the
+same block, it is yielded exactly once.  CRC is verified on every item; the
+iterator terminates on the first error from either end.
+
+---
+
+### `DynamicDblList`
+
+Same bin-based allocator as `DynamicBlockList` with `prev` pointers added.
+The block header is 28 bytes (CRC + prev + next + block\_size + data\_len);
+`block_size_for(size)` returns the smallest power-of-two ≥ `size + 28` (min 32,
+payload capacity = 4 bytes for bin 5).
+
+| Method                                       | Description                                                |
+|----------------------------------------------|------------------------------------------------------------|
+| `open(path)`                                 | Open or create; coalesces, recovers orphans, rebuilds tail |
+| `push_front(data)`                           | Allocate, write, and prepend                               |
+| `push_back(data)`                            | Allocate, write, and append                                |
+| `pop_front()` → `Option<Vec<u8>>`            | Unlink head, read payload, free block                      |
+| `pop_back()` → `Option<Vec<u8>>`             | Unlink tail, read payload, free block                      |
+| `pop_front_into(buf)` → `bool`               | Zero-copy pop from head                                    |
+| `pop_back_into(buf)` → `bool`                | Zero-copy pop from tail                                    |
+| `alloc(size)` → `DynBlockDblRef`             | Allocate block; splits or extends file                     |
+| `free(block)`                                | Return block to its bin                                    |
+| `write(block, data)`                         | Write payload, update `data_len`                           |
+| `read(block)` → `Vec<u8>`                    | Read `data_len` bytes, checksum-verify                     |
+| `read_into(block, buf)`                      | Zero-copy read into caller buffer                          |
+| `set_next(block, next)`                      | Update next pointer, preserve all other fields             |
+| `set_prev(block, prev)`                      | Update prev pointer, preserve all other fields             |
+| `get_next(block)` → `Option<DynBlockDblRef>` | Read next pointer (no CRC check)                           |
+| `get_prev(block)` → `Option<DynBlockDblRef>` | Read prev pointer (no CRC check)                           |
+| `root()` → `Option<DynBlockDblRef>`          | Current head of the active list                            |
+| `tail()` → `Option<DynBlockDblRef>`          | Current tail of the active list                            |
+| `capacity(block)` → `usize`                  | Payload capacity = `block_size − 28`                       |
+| `data_len(block)` → `usize`                  | Bytes last written to this block                           |
+| `data_start(block)` → `u64`                  | Logical offset of first payload byte (validates offset)    |
+| `data_end(block)` → `u64`                    | Logical offset past the last written byte                  |
+| `bstack()` → `&BStack`                       | Underlying file handle for raw read-only streaming         |
+| `iter()` → `DynDblIter<'_>`                  | Double-ended iterator (forward and backward)               |
+| `block_size_for(size)` → `usize`             | Smallest power-of-two total size ≥ `size + 28` (min 32)    |
+
+### `DynBlockDblRef`
+
+A `Copy` handle encoding a `DynamicDblList` block's logical byte offset.
+
+| Method                 | Description                                                            |
+|------------------------|------------------------------------------------------------------------|
+| `data_start()` → `u64` | Logical offset of the first payload byte (`self.0 + 28`); pure, no I/O |
+
+### `DynDblIter<'a>`
+
+A double-ended iterator over the active list of a `DynamicDblList`.  Obtained
+via `list.iter()?`.  Implements `Iterator` and `DoubleEndedIterator` with the
+same convergence semantics as `FixedDblIter`.
+
 ### `AsyncFixedBlockList<PAYLOAD_CAPACITY>` *(feature `async`)*
 
 An async, `Clone`-able wrapper around `FixedBlockList`. Each method runs on
@@ -242,7 +391,9 @@ approach as `AsyncFixedBlockList`.
 
 ## Traversal and iteration
 
-Both list types expose a forward iterator via `.iter()?`:
+All four list types expose an iterator via `.iter()?`.  The singly-linked types
+return a **forward-only** iterator; the doubly-linked types return a
+**double-ended** iterator.
 
 ```rust
 use bllist::FixedBlockList;
@@ -264,13 +415,45 @@ for item in list.iter()? {
 }
 ```
 
-`iter()` reads the current root once to seed the iterator; each subsequent
-`next()` issues one file read and one CRC verification.  The iterator holds a
-shared `&` reference to the list, preventing mutation while iteration is in
-progress.
+```rust
+use bllist::FixedDblList;
 
-`DoubleEndedIterator` is not implemented — both list types are singly-linked,
-so backward traversal is not possible without first collecting all elements.
+let list = FixedDblList::<44>::open("data.bldf")?;
+
+// Forward (head → tail):
+for item in list.iter()? {
+    println!("{}", String::from_utf8_lossy(&item?));
+}
+
+// Backward (tail → head) via DoubleEndedIterator:
+for item in list.iter()?.rev() {
+    println!("{}", String::from_utf8_lossy(&item?));
+}
+
+// Alternating from both ends simultaneously:
+let mut it = list.iter()?;
+while let Some(front) = it.next() {
+    println!("front: {}", String::from_utf8_lossy(&front?));
+    if let Some(back) = it.next_back() {
+        println!("back:  {}", String::from_utf8_lossy(&back?));
+    }
+}
+```
+
+`iter()` reads the current `root` (and `tail` for doubly-linked lists) once to
+seed the iterator; each subsequent `next()` / `next_back()` call issues one
+file read and CRC verification.  The iterator holds a shared `&` reference to
+the list, preventing mutation while iteration is in progress.
+
+For the doubly-linked iterators, both cursors advance toward each other.  When
+they converge on the same block, that block is yielded exactly once (from
+whichever side calls next), then both cursors are set to `None`.  The iterator
+terminates on the first error from either end.
+
+`DoubleEndedIterator` is **not** implemented for `FixedIter` and `DynIter` —
+the singly-linked list types do not store a tail pointer, so backward traversal
+would require collecting all elements first.  Use `FixedDblList` or
+`DynamicDblList` when bidirectional traversal is needed.
 
 ---
 
@@ -352,6 +535,43 @@ list.bstack().get_into(start, &mut frame[offset..])?;
 - The **block checksum** covers bytes `[4..block_size]` (next + block_size + data_len + full payload field, including zero-padded tail).
 - `data_len` records how many bytes were written; bytes beyond it are guaranteed to be zero.
 
+### `FixedDblList` files (`"BLDF"`)
+
+```
+┌──────────────────────────┬──────────────────────────────────────────────────────────┐
+│  BStack header (16 B)    │  bllist-dbl-fixed header (32 B, logical offset 0)        │
+│  "BSTK" magic + clen     │  "BLDF" + version + root + tail + free_head              │
+├──────────────────────────┴──────────────────────────────────────────────────────────┤
+│  Block 0  (PAYLOAD_CAPACITY+20 bytes, logical offset 32)                            │
+│  checksum(4) │ prev(8) │ next(8) │ payload(PAYLOAD_CAPACITY)                        │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  Block 1  …                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- The **header** stores `root`, `tail`, and `free_head`; `tail` enables O(1) `push_back` and `pop_back`.
+- The **block checksum** covers bytes `[4..PAYLOAD_CAPACITY+20]` (prev + next + full payload).
+- The **free list** is singly-linked via the `next` field of freed blocks (`prev` is zeroed on free).
+
+### `DynamicDblList` files (`"BLDD"`)
+
+```
+┌──────────────────────────┬──────────────────────────────────────────────────────────────┐
+│  BStack header (16 B)    │  bllist-dbl-dynamic header (280 B, logical off 0)            │
+│  "BSTK" magic + clen     │  "BLDD" + version + root + tail + bin_heads[32]              │
+├──────────────────────────┴──────────────────────────────────────────────────────────────┤
+│  Block (total size = 2^k bytes, k ≥ 5)                                                  │
+│  checksum(4) │ prev(8) │ next(8) │ block_size(4) │ data_len(4) │ payload(bs-28 B)      │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│  Block …                                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- The **header** stores `root`, `tail`, and 32 bin free-list heads.
+- Block layout adds `prev` before `next`; payload capacity = `block_size − 28`. Minimum block is 32 bytes (bin 5, 4-byte payload).
+- `block_size_for(size)` returns the smallest power-of-two ≥ `size + 28` (min 32).
+- Free blocks are singly-linked via the `next` field (`prev` zeroed); bin allocator, splitting, and coalescing are identical to `DynamicBlockList`.
+
 ---
 
 ## Crash safety details
@@ -375,31 +595,43 @@ No data that was fully committed (root updated) is ever lost.
 
 ## Choosing the right type
 
-|                            | `FixedBlockList`        | `DynamicBlockList`                                   |
-|----------------------------|-------------------------|------------------------------------------------------|
-| Record size                | Always the same         | Varies                                               |
-| On-disk overhead per block | 12 bytes                | 20 bytes                                             |
-| Block size on disk         | `PAYLOAD_CAPACITY + 12` | Power of two ≥ `payload + 20` (min 32)               |
-| Free list                  | Single flat list        | 32 power-of-two bins                                 |
-| Splitting                  | No                      | Up to `MAX_SPLIT` = 3 levels above target bin        |
-| Coalescing on open         | No                      | Adjacent free blocks merged when sum is power of two |
-| Tail-block shrink on free  | Yes                     | Yes                                                  |
-| Orphan scan                | O(n) slot enumeration   | O(n) sequential scan + rebuild                       |
-| File magic                 | `"BLLS"`                | `"BLLD"`                                             |
-| On-disk format version     | 1                       | 2                                                    |
+|                            | `FixedBlockList`        | `DynamicBlockList`                     | `FixedDblList`          | `DynamicDblList`                       |
+|----------------------------|-------------------------|----------------------------------------|-------------------------|----------------------------------------|
+| Record size                | Always the same         | Varies                                 | Always the same         | Varies                                 |
+| Links                      | Singly-linked           | Singly-linked                          | Doubly-linked           | Doubly-linked                          |
+| On-disk overhead per block | 12 bytes                | 20 bytes                               | 20 bytes                | 28 bytes                               |
+| Block size on disk         | `PAYLOAD_CAPACITY + 12` | Power of two ≥ `payload + 20` (min 32) | `PAYLOAD_CAPACITY + 20` | Power of two ≥ `payload + 28` (min 32) |
+| push/pop at both ends      | No                      | No                                     | Yes                     | Yes                                    |
+| Bidirectional iteration    | No                      | No                                     | Yes                     | Yes                                    |
+| Free list                  | Single flat list        | 32 power-of-two bins                   | Single flat list        | 32 power-of-two bins                   |
+| Splitting                  | No                      | Up to `MAX_SPLIT` = 3 levels           | No                      | Up to `MAX_SPLIT` = 3 levels           |
+| Coalescing on open         | No                      | Yes (adjacent same-power-of-two runs)  | No                      | Yes (adjacent same-power-of-two runs)  |
+| Tail-block shrink on free  | Yes                     | Yes                                    | Yes                     | Yes                                    |
+| Tail rebuilt on open       | N/A                     | N/A                                    | Yes                     | Yes                                    |
+| Orphan scan                | O(n) slot enumeration   | O(n) sequential scan + rebuild         | O(n) slot enumeration   | O(n) sequential scan + rebuild         |
+| File magic                 | `"BLLS"`                | `"BLLD"`                               | `"BLDF"`                | `"BLDD"`                               |
+| On-disk format version     | 1                       | 2                                      | 1                       | 1                                      |
 
-### Choosing `PAYLOAD_CAPACITY` for `FixedBlockList`
+**Choose singly-linked** (`FixedBlockList` / `DynamicBlockList`) when you only
+need a stack (push/pop from one end) or a forward-only iterator — they have
+lower per-block overhead.
+
+**Choose doubly-linked** (`FixedDblList` / `DynamicDblList`) when you need a
+queue (push to one end, pop from the other), bidirectional iteration, or
+efficient access to the tail.
+
+### Choosing `PAYLOAD_CAPACITY` for fixed-size lists
 
 - Minimum: `1`
-- For small records: `52` (64 bytes on disk), `116` (128 bytes on disk)
-- For larger records: set to your typical payload size directly
-- `PAYLOAD_CAPACITY = 0` is rejected at compile time
+- For `FixedBlockList` (`+12` overhead): `52` (64 bytes on disk), `116` (128 bytes on disk)
+- For `FixedDblList` (`+20` overhead): `44` (64 bytes on disk), `108` (128 bytes on disk)
+- `PAYLOAD_CAPACITY = 0` is rejected at compile time for both types
 
 ---
 
 ## Direct file access — use with extreme caution
 
-Both list types produce valid BStack files, so you can open them with
+All list types produce valid BStack files, so you can open them with
 `bstack::BStack::open` or inspect the raw bytes with any file tool.
 **Writing to the file outside of `bllist` is strongly discouraged.**
 `bllist` does not re-validate structural invariants on every operation, so

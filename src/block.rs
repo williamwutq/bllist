@@ -287,6 +287,43 @@ impl<L: BlockLayout> Block<L> {
     }
 }
 
+// ── block-ref formatting/conversion boilerplate ───────────────────────────────
+
+/// Generate `Display`, `LowerHex`, `UpperHex`, `From<u64>`, and `From<$Ref> for
+/// u64` impls for a newtype `$Ref(u64)` that represents a block reference.
+macro_rules! impl_block_ref {
+    ($Ref:ident) => {
+        impl std::fmt::Display for $Ref {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "@{}", self.0)
+            }
+        }
+        impl std::fmt::LowerHex for $Ref {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("@")?;
+                std::fmt::LowerHex::fmt(&self.0, f)
+            }
+        }
+        impl std::fmt::UpperHex for $Ref {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("@")?;
+                std::fmt::UpperHex::fmt(&self.0, f)
+            }
+        }
+        impl From<u64> for $Ref {
+            fn from(offset: u64) -> Self {
+                $Ref(offset)
+            }
+        }
+        impl From<$Ref> for u64 {
+            fn from(r: $Ref) -> u64 {
+                r.0
+            }
+        }
+    };
+}
+pub(crate) use impl_block_ref;
+
 // ── low-level checksum helpers ────────────────────────────────────────────────
 
 /// Write CRC32 of `buf[4..]` into `buf[0..4]`.

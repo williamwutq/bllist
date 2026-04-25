@@ -207,51 +207,7 @@ impl DynHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DynBlockRef(pub u64);
 
-impl fmt::Display for DynBlockRef {
-    /// Formats the block reference as `@offset` (decimal).
-    ///
-    /// Use `{:x}` / `{:#x}` for hexadecimal output via [`LowerHex`](fmt::LowerHex).
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "@{}", self.0)
-    }
-}
-
-impl fmt::LowerHex for DynBlockRef {
-    /// Formats the block offset in lower-case hexadecimal.
-    ///
-    /// Respects the `#` flag: `{:#x}` produces `@0x110`, `{:x}` produces `@110`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("@")?;
-        fmt::LowerHex::fmt(&self.0, f)
-    }
-}
-
-impl fmt::UpperHex for DynBlockRef {
-    /// Formats the block offset in upper-case hexadecimal.
-    ///
-    /// Respects the `#` flag: `{:#X}` produces `@0x110`, `{:X}` produces `@110`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("@")?;
-        fmt::UpperHex::fmt(&self.0, f)
-    }
-}
-
-impl From<u64> for DynBlockRef {
-    /// Create a `DynBlockRef` from a raw logical byte offset.
-    ///
-    /// No validation is performed; the offset is not checked against the file.
-    /// Use [`DynamicBlockList::alloc`] to obtain a valid reference.
-    fn from(offset: u64) -> Self {
-        DynBlockRef(offset)
-    }
-}
-
-impl From<DynBlockRef> for u64 {
-    /// Extract the raw logical byte offset from a `DynBlockRef`.
-    fn from(r: DynBlockRef) -> u64 {
-        r.0
-    }
-}
+crate::block::impl_block_ref!(DynBlockRef);
 
 impl DynBlockRef {
     /// Return the logical byte offset of the first payload byte for this block.

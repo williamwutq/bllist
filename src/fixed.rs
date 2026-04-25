@@ -37,51 +37,7 @@ const BLOCK_HEADER_SIZE: usize = 4 + FixedLayout::HEADER_CONTENT_SIZE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockRef(pub u64);
 
-impl fmt::Display for BlockRef {
-    /// Formats the block reference as `@offset` (decimal).
-    ///
-    /// Use `{:x}` / `{:#x}` for hexadecimal output via [`LowerHex`](fmt::LowerHex).
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "@{}", self.0)
-    }
-}
-
-impl fmt::LowerHex for BlockRef {
-    /// Formats the block offset in lower-case hexadecimal.
-    ///
-    /// Respects the `#` flag: `{:#x}` produces `@0x110`, `{:x}` produces `@110`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("@")?;
-        fmt::LowerHex::fmt(&self.0, f)
-    }
-}
-
-impl fmt::UpperHex for BlockRef {
-    /// Formats the block offset in upper-case hexadecimal.
-    ///
-    /// Respects the `#` flag: `{:#X}` produces `@0x110`, `{:X}` produces `@110`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("@")?;
-        fmt::UpperHex::fmt(&self.0, f)
-    }
-}
-
-impl From<u64> for BlockRef {
-    /// Create a `BlockRef` from a raw logical byte offset.
-    ///
-    /// No validation is performed; the offset is not checked against the file.
-    /// Use [`FixedBlockList::alloc`] to obtain a valid reference.
-    fn from(offset: u64) -> Self {
-        BlockRef(offset)
-    }
-}
-
-impl From<BlockRef> for u64 {
-    /// Extract the raw logical byte offset from a `BlockRef`.
-    fn from(r: BlockRef) -> u64 {
-        r.0
-    }
-}
+crate::block::impl_block_ref!(BlockRef);
 
 // ── Header (in-memory mirror of the 24-byte on-disk bllist header) ───────────
 

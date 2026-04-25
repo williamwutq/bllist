@@ -3,15 +3,17 @@
 //! `bllist` provides durable, crash-safe, checksummed block-based linked-list
 //! allocators built on top of a single [`bstack`] file.
 //!
-//! Two allocator types are available:
+//! Four allocator types are available:
 //!
-//! | Type | Block size | File magic | Use when |
-//! |------|-----------|------------|----------|
-//! | [`FixedBlockList<PAYLOAD_CAPACITY>`](FixedBlockList) | constant | `"BLLS"` | All records are the same size |
-//! | [`DynamicBlockList`] | variable (power-of-two bins) | `"BLLD"` | Records vary in size |
+//! | Type | Block size | Links | File magic | Use when |
+//! |------|-----------|-------|------------|----------|
+//! | [`FixedBlockList<N>`](FixedBlockList) | constant | singly-linked | `"BLLS"` | All records same size, forward-only |
+//! | [`DynamicBlockList`] | variable (power-of-two) | singly-linked | `"BLLD"` | Records vary, forward-only |
+//! | [`FixedDblList<N>`](FixedDblList) | constant | doubly-linked | `"BLDF"` | Same size, bidirectional / queue |
+//! | [`DynamicDblList`] | variable (power-of-two) | doubly-linked | `"BLDD"` | Variable size, bidirectional / queue |
 //!
-//! The two types use **different file formats** and cannot open each other's
-//! files. Both inherit BStack's exclusive advisory lock, durable fsync writes,
+//! All four types use **different file formats** and cannot open each other's
+//! files. All inherit BStack's exclusive advisory lock, durable fsync writes,
 //! and crash-recovery guarantees.
 //!
 //! ## Quick start — fixed-size blocks
@@ -126,9 +128,12 @@
 //! The iterator holds a `&` reference to the list, preventing mutation during
 //! traversal.
 //!
-//! [`DoubleEndedIterator`] is **not** implemented — both list types are
-//! singly-linked, so backward traversal is not possible without first
-//! collecting all elements.
+//! [`DoubleEndedIterator`] is implemented for [`FixedDblIter`] and
+//! [`DynDblIter`] (the doubly-linked list iterators), enabling backward
+//! traversal and efficient alternating front/back consumption.
+//! The singly-linked iterators ([`FixedIter`], [`DynIter`]) do not implement
+//! [`DoubleEndedIterator`] — backward traversal would require collecting all
+//! elements first.
 //!
 //! ### Why the async wrappers have no iterator
 //!
@@ -261,8 +266,10 @@
 
 pub mod block;
 pub mod dynamic;
+pub mod dynamic_dbl;
 pub mod error;
 pub mod fixed;
+pub mod fixed_dbl;
 
 #[cfg(feature = "async")]
 pub mod async_dynamic;
@@ -271,8 +278,10 @@ pub mod async_fixed;
 
 pub use block::BlockLayout;
 pub use dynamic::{DynBlockRef, DynIter, DynamicBlockList};
+pub use dynamic_dbl::{DynBlockDblRef, DynDblIter, DynamicDblList};
 pub use error::Error;
 pub use fixed::{BlockRef, FixedBlockList, FixedIter};
+pub use fixed_dbl::{BlockDblRef, FixedDblIter, FixedDblList};
 
 #[cfg(feature = "async")]
 pub use async_dynamic::AsyncDynamicBlockList;

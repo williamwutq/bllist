@@ -83,6 +83,15 @@ use bstack::BStack;
 use crc32fast::Hasher as CrcHasher;
 
 use crate::Error;
+use crate::block::{self, Block, BlockLayout};
+
+// ── block layout ─────────────────────────────────────────────────────────────
+
+pub(crate) struct DynLayout;
+impl BlockLayout for DynLayout {
+    /// next(8) + block_size(4) + data_len(4) = 16 bytes.
+    const HEADER_CONTENT_SIZE: usize = 16;
+}
 
 // ── on-disk constants ────────────────────────────────────────────────────────
 
@@ -107,7 +116,7 @@ pub const HEADER_SIZE: u64 = 272;
 pub const NUM_BINS: usize = 32;
 
 /// Byte size of the per-block header: checksum(4) + next(8) + block_size(4) + data_len(4).
-pub const BLOCK_HEADER_SIZE: usize = 20;
+pub const BLOCK_HEADER_SIZE: usize = 4 + DynLayout::HEADER_CONTENT_SIZE;
 
 /// Index of the smallest usable bin.
 ///
@@ -480,19 +489,15 @@ impl DynamicBlockList {
     /// [`Error::InvalidBlock`] for a bad offset, or [`Error::Io`] on failure.
     pub fn write(&self, block: DynBlockRef, data: &[u8]) -> Result<(), Error> {
         self.validate_block_offset(block.0)?;
-        // Read next(8) + block_size(4) — skip the 4-byte checksum at the front.
-        let mut fields = [0u8; 12];
-        self.stack.get_into(block.0 + 4, &mut fields)?;
-        let next = u64::from_le_bytes(fields[0..8].try_into().unwrap());
-        let block_size = u32::from_le_bytes(fields[8..12].try_into().unwrap()) as usize;
+        let b = Block::<DynLayout>::new(block.0);
+        let hc = b.read_header_unchecked(&self.stack)?;
+        let block_size = u32::from_le_bytes(hc[8..12].try_into().unwrap()) as usize;
         let payload_cap = block_size.saturating_sub(BLOCK_HEADER_SIZE);
-        if data.len() > payload_cap {
-            return Err(Error::DataTooLarge {
-                capacity: payload_cap,
-                provided: data.len(),
-            });
-        }
-        self.write_block_raw(block.0, block_size, next, data.len() as u32, data)
+        // Build updated header_content: preserve next+block_size, update data_len.
+        let mut new_hc = [0u8; DynLayout::HEADER_CONTENT_SIZE];
+        new_hc[0..12].copy_from_slice(&hc[0..12]); // next and block_size
+        new_hc[12..16].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        b.write(&self.stack, &new_hc, payload_cap, data)
     }
 
     /// Read the payload of `block`, returning only the `data_len` bytes that
@@ -568,18 +573,14 @@ impl DynamicBlockList {
     pub fn set_next(&self, block: DynBlockRef, next: Option<DynBlockRef>) -> Result<(), Error> {
         self.validate_block_offset(block.0)?;
         let next_val = next.map(|r| r.0).unwrap_or(0u64);
-
-        let mut bs_buf = [0u8; 4];
-        self.stack.get_into(block.0 + 12, &mut bs_buf)?;
-        let block_size = u32::from_le_bytes(bs_buf) as usize;
-
-        let mut buf = vec![0u8; block_size];
-        self.stack.get_into(block.0, &mut buf)?;
-        buf[4..12].copy_from_slice(&next_val.to_le_bytes());
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(block.0, &buf)?;
-        Ok(())
+        let b = Block::<DynLayout>::new(block.0);
+        let hc = b.read_header_unchecked(&self.stack)?;
+        let block_size = u32::from_le_bytes(hc[8..12].try_into().unwrap()) as usize;
+        let payload_cap = block_size.saturating_sub(BLOCK_HEADER_SIZE);
+        let mut new_hc = [0u8; DynLayout::HEADER_CONTENT_SIZE];
+        new_hc[0..8].copy_from_slice(&next_val.to_le_bytes());
+        new_hc[8..16].copy_from_slice(&hc[8..16]); // block_size + data_len
+        b.update_header(&self.stack, &new_hc, payload_cap)
     }
 
     /// Read the `next` pointer of `block` without verifying the checksum.
@@ -591,9 +592,8 @@ impl DynamicBlockList {
     /// Returns [`Error::InvalidBlock`] or [`Error::Io`].
     pub fn get_next(&self, block: DynBlockRef) -> Result<Option<DynBlockRef>, Error> {
         self.validate_block_offset(block.0)?;
-        let mut buf = [0u8; 8];
-        self.stack.get_into(block.0 + 4, &mut buf)?;
-        let next = u64::from_le_bytes(buf);
+        let hc = Block::<DynLayout>::new(block.0).read_header_unchecked(&self.stack)?;
+        let next = u64::from_le_bytes(hc[0..8].try_into().unwrap());
         Ok(if next == 0 {
             None
         } else {
@@ -863,14 +863,16 @@ impl DynamicBlockList {
 
     /// Write a zeroed free block with the given `block_size` and `next` pointer.
     fn write_free_block_raw(&self, offset: u64, block_size: usize, next: u64) -> Result<(), Error> {
-        let mut buf = vec![0u8; block_size];
-        buf[4..12].copy_from_slice(&next.to_le_bytes());
-        buf[12..16].copy_from_slice(&(block_size as u32).to_le_bytes());
-        // data_len = 0, payload = zeros
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(offset, &buf)?;
-        Ok(())
+        let mut hc = [0u8; DynLayout::HEADER_CONTENT_SIZE];
+        hc[0..8].copy_from_slice(&next.to_le_bytes());
+        hc[8..12].copy_from_slice(&(block_size as u32).to_le_bytes());
+        // data_len = 0
+        Block::<DynLayout>::new(offset).write(
+            &self.stack,
+            &hc,
+            block_size.saturating_sub(BLOCK_HEADER_SIZE),
+            &[],
+        )
     }
 
     /// Pop from bin's free list or grow the file. Caller holds `mu`.
@@ -912,8 +914,7 @@ impl DynamicBlockList {
         let mut buf = vec![0u8; block_size];
         buf[12..16].copy_from_slice(&(block_size as u32).to_le_bytes());
         // next = 0, data_len = 0, payload = zeros
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
+        block::write_checksum(&mut buf);
         let offset = self.stack.push(&buf)?;
         Ok(DynBlockRef(offset))
     }
@@ -986,22 +987,23 @@ impl DynamicBlockList {
         data_len: u32,
         data: &[u8],
     ) -> Result<(), Error> {
-        let mut buf = vec![0u8; block_size];
-        buf[4..12].copy_from_slice(&next.to_le_bytes());
-        buf[12..16].copy_from_slice(&(block_size as u32).to_le_bytes());
-        buf[16..20].copy_from_slice(&data_len.to_le_bytes());
-        buf[20..20 + data.len()].copy_from_slice(data);
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(offset, &buf)?;
-        Ok(())
+        let mut hc = [0u8; DynLayout::HEADER_CONTENT_SIZE];
+        hc[0..8].copy_from_slice(&next.to_le_bytes());
+        hc[8..12].copy_from_slice(&(block_size as u32).to_le_bytes());
+        hc[12..16].copy_from_slice(&data_len.to_le_bytes());
+        Block::<DynLayout>::new(offset).write(
+            &self.stack,
+            &hc,
+            block_size.saturating_sub(BLOCK_HEADER_SIZE),
+            data,
+        )
     }
 
     /// Read, CRC-verify, and return `(next, block_size, data)` for a block.
     fn read_block_full_static(stack: &BStack, offset: u64) -> Result<(u64, usize, Vec<u8>), Error> {
+        // Read header first (unchecked) to learn block_size and data_len.
         let mut hdr = [0u8; BLOCK_HEADER_SIZE];
         stack.get_into(offset, &mut hdr)?;
-        let stored_crc = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
         let block_size = u32::from_le_bytes(hdr[12..16].try_into().unwrap()) as usize;
         let data_len = u32::from_le_bytes(hdr[16..20].try_into().unwrap()) as usize;
 
@@ -1020,23 +1022,9 @@ impl DynamicBlockList {
             )));
         }
 
-        let payload = stack.get(
-            offset + BLOCK_HEADER_SIZE as u64,
-            offset + block_size as u64,
-        )?;
-        if payload.len() != payload_cap {
-            return Err(Error::InvalidBlock);
-        }
-
-        let mut hasher = CrcHasher::new();
-        hasher.update(&hdr[4..]);
-        hasher.update(&payload);
-        if hasher.finalize() != stored_crc {
-            return Err(Error::ChecksumMismatch { block: offset });
-        }
-
-        let next = u64::from_le_bytes(hdr[4..12].try_into().unwrap());
-        let data = payload[..data_len].to_vec();
+        let (hc, full_payload) = Block::<DynLayout>::new(offset).read(stack, payload_cap)?;
+        let next = u64::from_le_bytes(hc[0..8].try_into().unwrap());
+        let data = full_payload[..data_len].to_vec();
         Ok((next, block_size, data))
     }
 
@@ -1146,13 +1134,16 @@ impl DynamicBlockList {
         for &(off, bs) in &merged {
             let bin = bin_index(bs);
             let old_head = header.bin_heads[bin];
-            let mut buf = vec![0u8; bs];
-            buf[4..12].copy_from_slice(&old_head.to_le_bytes());
-            buf[12..16].copy_from_slice(&(bs as u32).to_le_bytes());
-            // data_len = 0, payload = zeros
-            let crc = crc32fast::hash(&buf[4..]);
-            buf[0..4].copy_from_slice(&crc.to_le_bytes());
-            stack.set(off, &buf)?;
+            let mut hc = [0u8; DynLayout::HEADER_CONTENT_SIZE];
+            hc[0..8].copy_from_slice(&old_head.to_le_bytes());
+            hc[8..12].copy_from_slice(&(bs as u32).to_le_bytes());
+            // data_len = 0
+            Block::<DynLayout>::new(off).write(
+                stack,
+                &hc,
+                bs.saturating_sub(BLOCK_HEADER_SIZE),
+                &[],
+            )?;
             header.bin_heads[bin] = off;
         }
 

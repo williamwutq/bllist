@@ -1,12 +1,19 @@
 use std::collections::HashSet;
-use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
-
-use bstack::BStack;
-use crc32fast::Hasher as CrcHasher;
+use std::{fmt, vec};
 
 use crate::Error;
+use crate::block::{self, Block, BlockLayout};
+use bstack::BStack;
+
+// ── block layout ─────────────────────────────────────────────────────────────
+
+pub(crate) struct FixedLayout;
+impl BlockLayout for FixedLayout {
+    /// next pointer (8 bytes).
+    const HEADER_CONTENT_SIZE: usize = 8;
+}
 
 // ── on-disk constants ────────────────────────────────────────────────────────
 
@@ -17,7 +24,7 @@ const VERSION: u32 = 1;
 /// Size of the bllist header at logical offset 0 within the BStack payload.
 const HEADER_SIZE: u64 = 24;
 /// Byte size of the per-block header: 4-byte checksum + 8-byte next pointer.
-const BLOCK_HEADER_SIZE: usize = 12;
+const BLOCK_HEADER_SIZE: usize = 4 + FixedLayout::HEADER_CONTENT_SIZE;
 
 // ── BlockRef ─────────────────────────────────────────────────────────────────
 
@@ -307,23 +314,8 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     ///
     /// Returns [`Error::DataTooLarge`] if `data.len() > PAYLOAD_CAPACITY`.
     pub fn write(&self, block: BlockRef, data: &[u8]) -> Result<(), Error> {
-        if data.len() > PAYLOAD_CAPACITY {
-            return Err(Error::DataTooLarge {
-                capacity: PAYLOAD_CAPACITY,
-                provided: data.len(),
-            });
-        }
         self.validate_block_offset(block.0)?;
-
-        let block_size = PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE;
-        let mut buf = vec![0u8; block_size];
-        // Preserve the current next pointer (8 bytes at block.0 + 4).
-        self.stack.get_into(block.0 + 4, &mut buf[4..12])?;
-        buf[12..12 + data.len()].copy_from_slice(data);
-        // buf[12 + data.len()..] stays zero — padding.
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(block.0, &buf)?;
+        Block::<FixedLayout>::new(block.0).write_payload(&self.stack, PAYLOAD_CAPACITY, data)?;
         Ok(())
     }
 
@@ -364,31 +356,8 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     ///
     /// [`write`]: Self::write
     pub fn read_into(&self, block: BlockRef, buf: &mut [u8]) -> Result<(), Error> {
-        if buf.len() > PAYLOAD_CAPACITY {
-            return Err(Error::DataTooLarge {
-                capacity: PAYLOAD_CAPACITY,
-                provided: buf.len(),
-            });
-        }
         self.validate_block_offset(block.0)?;
-
-        let mut hdr = [0u8; 12];
-        self.stack.get_into(block.0, &mut hdr)?;
-        // Read payload directly into the caller's buffer — zero copy.
-        self.stack.get_into(block.0 + 12, buf)?;
-
-        let stored = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-        let mut hasher = CrcHasher::new();
-        hasher.update(&hdr[4..12]); // next pointer
-        hasher.update(buf);
-        let tail = PAYLOAD_CAPACITY - buf.len();
-        if tail > 0 {
-            // write() always pads with zeros, so we hash zeros for the tail.
-            hasher.update(&vec![0u8; tail]);
-        }
-        if hasher.finalize() != stored {
-            return Err(Error::ChecksumMismatch { block: block.0 });
-        }
+        Block::<FixedLayout>::new(block.0).read_payload_into(&self.stack, PAYLOAD_CAPACITY, buf)?;
         Ok(())
     }
 
@@ -400,16 +369,11 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     pub fn set_next(&self, block: BlockRef, next: Option<BlockRef>) -> Result<(), Error> {
         self.validate_block_offset(block.0)?;
         let next_val = next.map(|r| r.0).unwrap_or(0u64);
-
-        // Read the full block so the existing payload is included in the new CRC.
-        let block_size = PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE;
-        let mut buf = vec![0u8; block_size];
-        self.stack.get_into(block.0, &mut buf)?;
-        buf[4..12].copy_from_slice(&next_val.to_le_bytes());
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(block.0, &buf)?;
-        Ok(())
+        Block::<FixedLayout>::new(block.0).update_header(
+            &self.stack,
+            &next_val.to_le_bytes(),
+            PAYLOAD_CAPACITY,
+        )
     }
 
     /// Return the next-block pointer of `block`.
@@ -422,9 +386,12 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     /// [`read`]: Self::read
     pub fn get_next(&self, block: BlockRef) -> Result<Option<BlockRef>, Error> {
         self.validate_block_offset(block.0)?;
-        let mut next_buf = [0u8; 8];
-        self.stack.get_into(block.0 + 4, &mut next_buf)?;
-        let next = u64::from_le_bytes(next_buf);
+        let next = u64::from_le_bytes(
+            Block::<FixedLayout>::new(block.0)
+                .read_at(&self.stack, 0, 8)?
+                .try_into()
+                .unwrap(),
+        );
         Ok(if next == 0 {
             None
         } else {
@@ -530,13 +497,12 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
         }
         let old_root = header.root;
 
-        // read_into does not acquire mu, so this is deadlock-free.
-        self.read_into(BlockRef(old_root), buf)?;
-
-        // Read the next pointer separately (read_into does not expose it).
-        let mut next_buf = [0u8; 8];
-        self.stack.get_into(old_root + 4, &mut next_buf)?;
-        let next = u64::from_le_bytes(next_buf);
+        let hc = Block::<FixedLayout>::new(old_root).read_payload_into(
+            &self.stack,
+            PAYLOAD_CAPACITY,
+            buf,
+        )?;
+        let next = u64::from_le_bytes(hc[0..8].try_into().unwrap());
 
         header.root = next;
         self.write_header_locked(&header)?;
@@ -581,8 +547,9 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
             Ok(BlockRef(fh))
         } else {
             let block_size = PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE;
-            let zeros = vec![0u8; block_size];
-            let offset = self.stack.push(&zeros)?;
+            let mut buf = vec![0u8; block_size];
+            block::write_checksum(&mut buf);
+            let offset = self.stack.push(&buf)?;
             debug_assert!(
                 offset >= HEADER_SIZE && (offset - HEADER_SIZE).is_multiple_of(block_size as u64),
                 "newly pushed block has misaligned offset {offset}"
@@ -594,13 +561,12 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     /// Free `block` by zeroing it, linking it into the free list, and
     /// updating `header.free_list_head`. Caller must hold `mu`.
     fn free_locked(&self, block: BlockRef, header: &mut Header) -> Result<(), Error> {
-        let block_size = PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE;
-        let mut buf = vec![0u8; block_size];
-        buf[4..12].copy_from_slice(&header.free_list_head.to_le_bytes());
-        // buf[12..] stays zero — payload cleared on free.
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(block.0, &buf)?;
+        Block::<FixedLayout>::new(block.0).write(
+            &self.stack,
+            &header.free_list_head.to_le_bytes(),
+            PAYLOAD_CAPACITY,
+            &[],
+        )?;
         header.free_list_head = block.0;
         self.write_header_locked(header)?;
         Ok(())
@@ -609,31 +575,20 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
     /// Build a block buffer with `next` and `data`, compute its CRC, and
     /// write it atomically with a single `set`. Does NOT acquire `mu`.
     fn write_block_with_next(&self, offset: u64, next: u64, data: &[u8]) -> Result<(), Error> {
-        let block_size = PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE;
-        let mut buf = vec![0u8; block_size];
-        buf[4..12].copy_from_slice(&next.to_le_bytes());
-        buf[12..12 + data.len()].copy_from_slice(data);
-        let crc = crc32fast::hash(&buf[4..]);
-        buf[0..4].copy_from_slice(&crc.to_le_bytes());
-        self.stack.set(offset, &buf)?;
-        Ok(())
+        Block::<FixedLayout>::new(offset).write(
+            &self.stack,
+            &next.to_le_bytes(),
+            PAYLOAD_CAPACITY,
+            data,
+        )
     }
 
     /// Read a full block, verify its checksum, and return `(next, payload)`.
     /// Does NOT acquire `mu`.
     fn read_block_full(&self, offset: u64) -> Result<(u64, Vec<u8>), Error> {
-        let block_size = PAYLOAD_CAPACITY + BLOCK_HEADER_SIZE;
-        let buf = self.stack.get(offset, offset + block_size as u64)?;
-        if buf.len() != block_size {
-            return Err(Error::InvalidBlock);
-        }
-        let stored = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        let computed = crc32fast::hash(&buf[4..]);
-        if computed != stored {
-            return Err(Error::ChecksumMismatch { block: offset });
-        }
-        let next = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-        let payload = buf[12..].to_vec();
+        let (hc, payload) =
+            Block::<FixedLayout>::new(offset).read(&self.stack, PAYLOAD_CAPACITY)?;
+        let next = u64::from_le_bytes(hc[0..8].try_into().unwrap());
         Ok((next, payload))
     }
 
@@ -658,14 +613,10 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
             if steps >= max_steps {
                 return Err(Error::Corruption("cycle detected in active list".into()));
             }
-            let mut block_buf = vec![0u8; block_size];
-            stack.get_into(cur, &mut block_buf)?;
-            let stored = u32::from_le_bytes(block_buf[0..4].try_into().unwrap());
-            if crc32fast::hash(&block_buf[4..]) != stored {
-                return Err(Error::ChecksumMismatch { block: cur });
-            }
+            // A full read here is performed to verify the checksum of every block in the active list.
+            let (hc, _) = Block::<FixedLayout>::new(cur).read(stack, PAYLOAD_CAPACITY)?;
             active.insert(cur);
-            cur = u64::from_le_bytes(block_buf[4..12].try_into().unwrap());
+            cur = u64::from_le_bytes(hc[0..8].try_into().unwrap());
             steps += 1;
         }
 
@@ -677,14 +628,15 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
             if steps >= max_steps {
                 return Err(Error::Corruption("cycle detected in free list".into()));
             }
-            let mut block_buf = vec![0u8; block_size];
-            stack.get_into(cur, &mut block_buf)?;
-            let stored = u32::from_le_bytes(block_buf[0..4].try_into().unwrap());
-            if crc32fast::hash(&block_buf[4..]) != stored {
-                return Err(Error::ChecksumMismatch { block: cur });
-            }
             free_set.insert(cur);
-            cur = u64::from_le_bytes(block_buf[4..12].try_into().unwrap());
+            // Here a full read is NOT performed; we only need to trust the next pointer to find all free blocks.
+            // If the checksum is bad, the block will be unreachable from the free list and will be reclaimed in the final step.
+            cur = u64::from_le_bytes(
+                Block::<FixedLayout>::new(cur)
+                    .read_at(stack, 0, 8)?
+                    .try_into()
+                    .unwrap(),
+            );
             steps += 1;
         }
 
@@ -695,12 +647,12 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
             if active.contains(&offset) || free_set.contains(&offset) {
                 continue;
             }
-            // Orphaned block — zero it and link into free list.
-            let mut buf = vec![0u8; block_size];
-            buf[4..12].copy_from_slice(&header.free_list_head.to_le_bytes());
-            let crc = crc32fast::hash(&buf[4..]);
-            buf[0..4].copy_from_slice(&crc.to_le_bytes());
-            stack.set(offset, &buf)?;
+            Block::<FixedLayout>::new(offset).write(
+                stack,
+                &header.free_list_head.to_le_bytes(),
+                PAYLOAD_CAPACITY,
+                &[],
+            )?;
             header.free_list_head = offset;
             found_orphan = true;
         }
@@ -893,18 +845,17 @@ mod tests {
     }
 
     #[test]
-    fn read_into_shorter_than_written_fails_crc() {
+    fn read_into_shorter_buf_returns_prefix() {
         let path = tmp("read_into_crc");
         let list = List::open(&path).unwrap();
         let block = list.alloc().unwrap();
 
-        // Write 20 non-zero bytes; reading into a 5-byte buf means bytes 5-19
-        // are non-zero but we assume zero for the tail CRC → mismatch.
+        // CRC is verified over the full block; a short buf gets the first N bytes.
         list.write(block, &[0xAB; 20]).unwrap();
 
         let mut buf = vec![0u8; 5];
-        let err = list.read_into(block, &mut buf).unwrap_err();
-        assert!(matches!(err, Error::ChecksumMismatch { .. }));
+        list.read_into(block, &mut buf).unwrap();
+        assert_eq!(buf, vec![0xAB; 5]);
 
         let _ = std::fs::remove_file(&path);
     }

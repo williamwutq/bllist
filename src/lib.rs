@@ -259,6 +259,7 @@
 //!
 //! [`flock`]: https://man7.org/linux/man-pages/man2/flock.2.html
 
+pub mod block;
 pub mod dynamic;
 pub mod error;
 pub mod fixed;
@@ -268,6 +269,7 @@ pub mod async_dynamic;
 #[cfg(feature = "async")]
 pub mod async_fixed;
 
+pub use block::BlockLayout;
 pub use dynamic::{DynBlockRef, DynIter, DynamicBlockList};
 pub use error::Error;
 pub use fixed::{BlockRef, FixedBlockList, FixedIter};

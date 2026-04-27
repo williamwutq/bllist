@@ -264,6 +264,7 @@
 //!
 //! [`flock`]: https://man7.org/linux/man-pages/man2/flock.2.html
 
+pub mod allocator;
 pub mod block;
 pub mod dynamic;
 pub mod dynamic_dbl;

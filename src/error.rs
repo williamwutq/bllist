@@ -72,6 +72,29 @@ pub enum Error {
     Unknown, // Placeholder for future variants without breaking changes
 }
 
+impl Error {
+    /// Helper function to create an `io::Error` with `Error::Corruption` as the source.
+    pub fn stdio_corruption(msg: impl Into<String>) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, Error::Corruption(msg.into()))
+    }
+
+    /// Helper function to create an `io::Error` with `Error::ChecksumMismatch` as the source.
+    pub fn stdio_checksum_mismatch(block: u64) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            Error::ChecksumMismatch { block },
+        )
+    }
+
+    /// Helper function to create an `io::Error` with a slice error message for invalid slice operations.
+    pub fn stdio_invalid_slice() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid slice: only slice allocated by alloc or realloc can be reallocated or deallocated",
+        )
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

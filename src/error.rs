@@ -48,6 +48,28 @@ pub enum Error {
         /// Number of bytes the caller supplied.
         provided: usize,
     },
+
+    /// The version string in the file header does not match the expected version.
+    /// This indicates the file was written by an incompatible version of this library.
+    ///
+    /// The `found` field contains the version number read from the file, and the `expected`
+    /// field contains the version number expected by this library.
+    IncompatibleVersion {
+        /// The 4 character code of the element that has the version mismatch.
+        element: [u8; 4],
+        /// Version found in the file header.
+        found: u32,
+        /// Version expected by this library.
+        expected: u32,
+    },
+
+    /// An unknown element was encountered in the file header or block header.
+    UnknownElement {
+        /// The 4 character code of the unknown element.
+        element: [u8; 4],
+    },
+
+    Unknown, // Placeholder for future variants without breaking changes
 }
 
 impl fmt::Display for Error {
@@ -70,6 +92,29 @@ impl fmt::Display for Error {
                 f,
                 "data length {provided} exceeds block payload capacity {capacity}"
             ),
+            Error::IncompatibleVersion {
+                element,
+                found,
+                expected,
+            } => write!(
+                f,
+                "incompatible version for element {:?}: found {}, expected {}",
+                std::str::from_utf8(element).unwrap_or(
+                    // Use hex if the element is not valid UTF-8
+                    &format!("0x{:02X?}", element)
+                ),
+                found,
+                expected
+            ),
+            Error::UnknownElement { element } => write!(
+                f,
+                "unknown element in file header or block header: {:?}",
+                std::str::from_utf8(element).unwrap_or(
+                    // Use hex if the element is not valid UTF-8
+                    &format!("0x{:02X?}", element)
+                )
+            ),
+            _ => write!(f, "an unknown error occurred"),
         }
     }
 }

@@ -128,17 +128,67 @@ fn make_deadbeef_vec(len: usize) -> Vec<u8> {
     }
 }
 
+/// Helper function to fill a buffer with the pattern 0xDEADBEEF for testing purposes.
+#[cfg(debug_assertions)]
+fn write_deadbeef(buf: &mut [u8]) {
+    let pattern = 0xDEADBEEF_u32.to_le_bytes();
+    for chunk in buf.chunks_mut(4) {
+        let len = chunk.len();
+        chunk.copy_from_slice(&pattern[..len]);
+    }
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Debug)]
+pub enum RepairLevel {
+    /// No repair, just return errors when corruption is detected
+    None,
+
+    /// Repair the header if the header checksum is invalid but the bin pointer checksum is valid
+    HeaderIfValidBinPointers,
+
+    /// Repair bin pointer region corruption by zeroing out all bin pointers and treating all bins as empty
+    /// then rebuild the free list by traversing the entire file and adding all blocks that are not marked as allocated
+    RecollectOnCorruption,
+
+    /// Always repair bin pointer region corruption by zeroing out all bin pointers and treating all bins as empty
+    /// on each open and gather orphans. Does not always repair blocks.
+    AlwaysRecollect,
+
+    /// RecollectOnCorruption, but also always repair block checksum corruption by trusting block content
+    RecollectAndTrustBlocks,
+
+    /// Always repair bin pointer region corruption by zeroing out all bin pointers and treating all bins as empty
+    /// on each open, and also always repair block checksum corruption by trusting block content
+    AlwaysRecollectAndTrustBlocks,
+
+    /// Force all repairs regardless of checksum validity
+    ForceAllRepairs,
+}
+
 #[derive(Debug)]
 pub struct BinAlloc {
     stack: BStack,
+    repair_level: RepairLevel,
 }
 
 unsafe impl Send for BinAlloc {}
 unsafe impl Sync for BinAlloc {}
 
 impl BinAlloc {
-    pub fn new(stack: BStack) -> Result<Self, io::Error> {
-        let total = stack.len()?;
+    pub fn new(stack: BStack, repair_level: RepairLevel) -> Result<Self, io::Error> {
+        // Get the total size of the file. If repair_level is ForceAllRepairs, we will discard all existing
+        // content and treat the file as empty if it's in an unrepairable state
+        let total = if repair_level == RepairLevel::ForceAllRepairs {
+            let total = stack.len()?;
+            if total < RESERVED_SIZE + HEADER_SIZE {
+                stack.discard(total)?;
+                0
+            } else {
+                total
+            }
+        } else {
+            stack.len()?
+        };
         if total == 0 {
             // Case 1: new file, need to initialize header and bin pointers
 
@@ -162,10 +212,15 @@ impl BinAlloc {
             let bin_pointers = [0u8; BIN_POINTERS_SIZE as usize];
             stack.push(&bin_pointers)?;
 
-            Ok(Self { stack })
+            Ok(Self {
+                stack,
+                repair_level,
+            })
         } else if total < RESERVED_SIZE + HEADER_SIZE {
             // Case 2: file is too small to contain the header, treat as corruption since
             // it cannot be a file with an allocator
+            // Unless repair_level is ForceAllRepairs, in which case we will discard all
+            // existing content and treat the file as empty where Case 1 will be taken
             Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
@@ -191,7 +246,10 @@ impl BinAlloc {
             // retried.
             stack.extend(BIN_POINTERS_SIZE)?;
 
-            Ok(Self { stack })
+            Ok(Self {
+                stack,
+                repair_level,
+            })
         } else {
             // Case 4: file is large enough to contain the header and bin pointer region, validate them
 
@@ -205,12 +263,26 @@ impl BinAlloc {
             let bin_buf = stack.get(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
             let crc = crc32fast::hash(&bin_buf);
             let stored_crc = u32::from_le_bytes(hdr_buf[12..16].try_into().unwrap());
+            let should_check_blocks = repair_level >= RepairLevel::RecollectAndTrustBlocks;
+            let mut should_rebuild_free_list = repair_level
+                >= RepairLevel::AlwaysRecollectAndTrustBlocks
+                || repair_level == RepairLevel::AlwaysRecollect;
             if crc != stored_crc {
                 // Recover A
-                todo!("Run file recovery for bin pointer region corruption")
+                if repair_level >= RepairLevel::RecollectOnCorruption {
+                    should_rebuild_free_list = true;
+                } else {
+                    return Err(Error::stdio_corruption(format!(
+                        "CRC32 checksum mismatch for bin pointer region: expected {stored_crc:#010X}, got {crc:#010X}"
+                    )));
+                }
             } else if header_validation_result.is_err() {
                 // Recover X
-                todo!("Run file recovery for header corruption")
+                if repair_level != RepairLevel::None {
+                    rechecksum(&stack, ALLOC_OFFSET, BIN_POINTERS_OFFSET)?;
+                } else {
+                    return Err(header_validation_result.err().unwrap());
+                }
             }
 
             // Validate all pointers in the bin pointer region. We allow them to be zero (empty bin) or
@@ -225,18 +297,104 @@ impl BinAlloc {
 
             for &ptr in bin_ptrs {
                 if !Self::is_valid_block_offset(ptr) {
-                    // Recovery A
-                    todo!("Run file recovery for bin pointer region corruption")
+                    // Recover A
+                    if repair_level >= RepairLevel::RecollectOnCorruption {
+                        should_rebuild_free_list = true;
+                    } else {
+                        return Err(Error::stdio_corruption(format!(
+                            "invalid block offset {ptr} in bin pointer region"
+                        )));
+                    }
                 }
             }
 
-            // Tranverse list to fix potential "Recover B"
-            // TODO
+            if should_check_blocks || should_rebuild_free_list {
+                // Tranverse list to fix potential "Recover B"
+                if should_check_blocks {
+                    for (class, &ptr) in (MIN_BIN as u32..).zip(bin_ptrs.iter()) {
+                        let block_size = Self::size_from_class(class);
+                        let mut head = ptr;
+                        while head != 0 {
+                            if !Self::is_valid_block_offset(head) {
+                                if repair_level >= RepairLevel::RecollectOnCorruption {
+                                    should_rebuild_free_list = true;
+                                    // This also aborts the block repair since the list is corrupted
+                                    break;
+                                } else {
+                                    return Err(Error::stdio_corruption(format!(
+                                        "invalid block offset {head} in free list traversal"
+                                    )));
+                                }
+                            }
 
-            // Recover orphans
-            // TODO
+                            let mut vec = stack.get(head, head + BLOCK_HEADER_SIZE + 8)?;
+                            let mut write = false;
+                            let block_class = u32::from_le_bytes(vec[4..8].try_into().unwrap());
+                            let data_len = u64::from_le_bytes(vec[8..16].try_into().unwrap());
+                            let next = u64::from_le_bytes(vec[16..24].try_into().unwrap());
+                            // Check for correct block_class
+                            if block_class != class {
+                                if data_len != block_size {
+                                    // This is sus
+                                    // Check validity of class
+                                    if class >= MIN_BIN as u32
+                                        && class <= MAX_BLOCK_CLASS
+                                        && Self::size_from_class(class) == block_size
+                                    {
+                                        // This was put into the wrong bin
+                                        if repair_level >= RepairLevel::RecollectOnCorruption {
+                                            should_rebuild_free_list = true;
+                                        }
+                                        break;
+                                    } else if repair_level
+                                        >= RepairLevel::AlwaysRecollectAndTrustBlocks
+                                    {
+                                        should_rebuild_free_list = true;
+                                    } else {
+                                        return Err(Error::stdio_corruption(format!(
+                                            "invalid block class {} in block at offset {head} in free list traversal for bin class {class}",
+                                            block_class
+                                        )));
+                                    }
+                                }
+                                // Repairs it
+                                vec[4..8].copy_from_slice(&class.to_le_bytes());
+                                write = true;
+                            }
 
-            Ok(Self { stack })
+                            // Check for pausible data_len (not greater than block size - header size)
+                            if data_len != block_size {
+                                // Set to block_size to indicate free block, and it will be added back to the free list later
+                                vec[8..16].copy_from_slice(&block_size.to_le_bytes());
+                                write = true;
+                            }
+
+                            if write {
+                                // Update checksum for the block
+                                let mut full_block = stack.get(head, head + block_size)?;
+                                #[cfg(debug_assertions)]
+                                write_deadbeef(&mut full_block);
+                                full_block[..BLOCK_HEADER_SIZE as usize + 8].copy_from_slice(&vec);
+                                write_checksum(&mut full_block);
+                                stack.set(head, &full_block)?;
+                            }
+
+                            head = next;
+                        }
+                    }
+                }
+
+                // Recover orphans
+                if should_rebuild_free_list {
+                    stack.zero(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
+                    todo!()
+                }
+            }
+
+            Ok(Self {
+                stack,
+                repair_level,
+            })
         }
     }
 
@@ -415,12 +573,14 @@ impl BinAlloc {
         let mut buf = self.stack.get(offset, offset + block_size)?;
         let current_data_len = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         // Check the current checksum and block class
-        verify_checksum_stdio(
+        match verify_checksum_stdio(
             &buf[..(current_data_len + BLOCK_HEADER_SIZE) as usize],
             offset,
-        )?;
-
-        // TODO: handle error differently?
+        ) {
+            Ok(_) => {}
+            Err(_) if self.repair_level >= RepairLevel::RecollectAndTrustBlocks => {}
+            Err(e) => return Err(e),
+        }
 
         // Figure out the current block class
         let current_block_class = u32::from_le_bytes(buf[4..8].try_into().unwrap());

@@ -69,7 +69,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let path = path.as_ref().to_path_buf();
         tokio::task::spawn_blocking(move || FixedBlockList::open(&path))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
             .map(|list| Self(Arc::new(list)))
     }
 
@@ -99,7 +99,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.alloc())
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`FixedBlockList::free`].
@@ -107,7 +107,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.free(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── payload I/O ───────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.write(block, data.as_ref()))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`FixedBlockList::read`].
@@ -133,7 +133,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.read(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── structural pointer operations ─────────────────────────────────────────
@@ -143,7 +143,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.set_next(block, next))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`FixedBlockList::get_next`].
@@ -151,7 +151,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.get_next(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── list head ─────────────────────────────────────────────────────────────
@@ -161,7 +161,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.root())
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── convenience list operations ───────────────────────────────────────────
@@ -177,7 +177,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.push_front(data.as_ref()))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`FixedBlockList::pop_front`].
@@ -185,7 +185,7 @@ impl<const PAYLOAD_CAPACITY: usize> AsyncFixedBlockList<PAYLOAD_CAPACITY> {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.pop_front())
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 }
 

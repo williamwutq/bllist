@@ -128,17 +128,6 @@ fn make_deadbeef_vec(len: usize) -> Vec<u8> {
     }
 }
 
-/// Helper function to fill a buffer with the pattern 0xDEADBEEF for testing purposes.
-#[cfg(debug_assertions)]
-fn write_deadbeef(buf: &mut [u8]) {
-    unsafe {
-        let u32_buf = std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u32, buf.len() / 4);
-        for x in u32_buf {
-            *x = 0xDEADBEEF;
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct BinAlloc {
     stack: BStack,

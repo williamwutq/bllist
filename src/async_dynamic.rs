@@ -69,7 +69,7 @@ impl AsyncDynamicBlockList {
         let path = path.as_ref().to_path_buf();
         tokio::task::spawn_blocking(move || DynamicBlockList::open(&path))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
             .map(|list| Self(Arc::new(list)))
     }
 
@@ -99,7 +99,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.alloc(size))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`DynamicBlockList::free`].
@@ -107,7 +107,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.free(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── payload I/O ───────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.write(block, data.as_ref()))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`DynamicBlockList::read`].
@@ -133,7 +133,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.read(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── structural pointer operations ─────────────────────────────────────────
@@ -147,7 +147,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.set_next(block, next))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`DynamicBlockList::get_next`].
@@ -155,7 +155,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.get_next(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── list head ─────────────────────────────────────────────────────────────
@@ -165,7 +165,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.root())
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── block metadata ────────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.capacity(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`DynamicBlockList::data_len`].
@@ -183,7 +183,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.data_len(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`DynamicBlockList::data_end`].
@@ -191,7 +191,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.data_end(block))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     // ── convenience list operations ───────────────────────────────────────────
@@ -207,7 +207,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.push_front(data.as_ref()))
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 
     /// Async version of [`DynamicBlockList::pop_front`].
@@ -215,7 +215,7 @@ impl AsyncDynamicBlockList {
         let inner = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || inner.pop_front())
             .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .map_err(|e| Error::Io(io::Error::other(e.to_string())))?
     }
 }
 

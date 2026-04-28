@@ -210,14 +210,18 @@ impl BinAlloc {
             let mut hdr_buf = [0u8; HEADER_SIZE as usize];
             stack.get_into(ALLOC_OFFSET, &mut hdr_buf)?;
             verify_checksum_stdio(&hdr_buf, ALLOC_OFFSET)?;
-            Self::validate_header(&hdr_buf)?;
+            let header_validation_result = Self::validate_header(&hdr_buf);
 
             // Validate checksum for the bin pointer region
             let bin_buf = stack.get(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
             let crc = crc32fast::hash(&bin_buf);
             let stored_crc = u32::from_le_bytes(hdr_buf[12..16].try_into().unwrap());
             if crc != stored_crc {
+                // Recover A
                 todo!("Run file recovery for bin pointer region corruption")
+            } else if header_validation_result.is_err() {
+                // Recover X
+                todo!("Run file recovery for header corruption")
             }
 
             // Validate all pointers in the bin pointer region. We allow them to be zero (empty bin) or
@@ -232,9 +236,16 @@ impl BinAlloc {
 
             for &ptr in bin_ptrs {
                 if !Self::is_valid_block_offset(ptr) {
+                    // Recovery A
                     todo!("Run file recovery for bin pointer region corruption")
                 }
             }
+
+            // Tranverse list to fix potential "Recover B"
+            // TODO
+
+            // Recover orphans
+            // TODO
 
             Ok(Self { stack })
         }
@@ -338,15 +349,11 @@ impl BinAlloc {
             // TODO: try to split from existing larger blocks before extending the file
 
             // Case 1: empty bin, need to allocate a new block at the end of the file
-            let offset = self.stack.extend(block_size)?;
+            let mut new_slice = vec![0u8; block_size as usize];
+            new_slice[..old_data.len()].copy_from_slice(&old_data);
 
-            // Write the old data to the new block
-            // If this step fails and the previous one succeed, on the next open
-            // we will see that neither its checksum nor its class are correct, which prompt
-            // us to treat it as a completely corrupted block that can be reallocated
-            // Recover C: Invalid checksum + size class for block
-            self.stack.set(offset, old_data)?;
-            Ok(offset)
+            // A single write
+            self.stack.push(&new_slice)
         } else if !Self::is_valid_block_offset(head) {
             // Case 2: invalid block offset in the bin pointer, treat as corruption
             // since it cannot be a valid block

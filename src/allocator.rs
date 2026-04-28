@@ -283,7 +283,7 @@ impl BinAlloc {
                 ),
             ));
         }
-        return Ok(());
+        Ok(())
     }
 
     /// Checks if the given offset is a valid block offset, which means it is either zero (empty bin) or
@@ -350,7 +350,7 @@ impl BinAlloc {
 
             // Case 1: empty bin, need to allocate a new block at the end of the file
             let mut new_slice = vec![0u8; block_size as usize];
-            new_slice[..old_data.len()].copy_from_slice(&old_data);
+            new_slice[..old_data.len()].copy_from_slice(old_data);
 
             // A single write
             self.stack.push(&new_slice)
@@ -445,7 +445,7 @@ impl BinAlloc {
 
             if block_class != current_block_class {
                 // Also update the block class
-                buf[4..8].copy_from_slice(&(block_size.trailing_zeros() as u32).to_le_bytes());
+                buf[4..8].copy_from_slice(&block_size.trailing_zeros().to_le_bytes());
 
                 // Add to free list
                 // |B|5| 4 | Add 3 |  Addition 2  |            Addition 1           |
@@ -456,8 +456,18 @@ impl BinAlloc {
                     vec![0u8; (BIN_POINTERS_END - BIN_POINTERS_OFFSET + 4) as usize];
                 self.stack
                     .get_into(BIN_POINTERS_OFFSET - 4, &mut free_list_buf)?;
+                self.stack.zero(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
 
-                todo!("Recursively add to free list")
+                for k in block_class..current_block_class {
+                    let free_offset = offset + (1u64 << k);
+                    self.write_free_block(free_offset, k)?;
+                    let bin_slice_offset = Self::find_bin_offset_in_slice(k);
+                    free_list_buf[bin_slice_offset..bin_slice_offset + 8]
+                        .copy_from_slice(&free_offset.to_le_bytes());
+                }
+                write_checksum(&mut free_list_buf);
+                self.stack.set(BIN_POINTERS_OFFSET - 4, &free_list_buf)?;
+                rechecksum(&self.stack, ALLOC_OFFSET, BIN_POINTERS_OFFSET)?;
             }
 
             // Update checksum for the block
@@ -510,7 +520,7 @@ impl BStackAllocator for BinAlloc {
 
     fn alloc(&self, len: u64) -> Result<BStackSlice<'_, Self>, std::io::Error> {
         let zero_buf = &mut [0u8; BLOCK_HEADER_SIZE as usize];
-        let offset = Self::alloc_block(&self, len, zero_buf, 0)?;
+        let offset = Self::alloc_block(self, len, zero_buf, 0)?;
         Ok(BStackSlice::new(self, offset + BLOCK_HEADER_SIZE, len))
     }
 
@@ -534,7 +544,7 @@ impl BStackAllocator for BinAlloc {
         } else {
             // Prepare data to copy to the new block
             let mut old_data_buf = self.stack.get(old_ptr, slice.start() + len)?;
-            let new_offset = Self::alloc_block(&self, new_len, &mut old_data_buf, old_ptr)?;
+            let new_offset = Self::alloc_block(self, new_len, &mut old_data_buf, old_ptr)?;
             Ok(BStackSlice::new(
                 self,
                 new_offset + BLOCK_HEADER_SIZE,
@@ -564,7 +574,7 @@ impl BStackAllocator for BinAlloc {
         let mut buf = vec![0u8; (BIN_POINTERS_END - BIN_POINTERS_OFFSET + 4) as usize];
         self.stack.get_into(BIN_POINTERS_OFFSET - 4, &mut buf)?;
         self.stack.zero(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
-        
+
         // Write the old block offset to the bin pointer region to free it
         buf[bin_offset..bin_offset + 8].copy_from_slice(&old_ptr.to_le_bytes());
 

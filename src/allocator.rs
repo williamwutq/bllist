@@ -50,7 +50,7 @@
 //! occupies 60 * 8 = 480 bytes, which fits in the logical offset range [48..528]
 //! immediately after the allocator header.
 
-use bstack::{BStack, BStackAllocator, BStackSlice};
+use bstack::{BStack, BStackAllocator, BStackSlice, FirstFitBStackAllocator};
 
 use crate::Error;
 use std::io;
@@ -136,6 +136,35 @@ fn write_deadbeef(buf: &mut [u8]) {
         let len = chunk.len();
         chunk.copy_from_slice(&pattern[..len]);
     }
+}
+
+/// # ReservedAllocator
+///
+/// A trait for allocators that reserve a certain amount of space at the beginning of the file
+/// for other purposes. This is used to allow the user to use the reserved space for their own
+/// metadata, and the allocator will not touch that region. The allocator will start allocating
+/// blocks after the reserved region. The reserved region is also not included in the checksum
+/// calculations for the allocator header, so the user can freely modify the reserved region
+/// without affecting the integrity of the allocator.
+///
+/// ## Safety
+/// The implementor must ensure that the reserved region is not used by the allocator and is not
+/// included in the checksum calculations for the allocator header. Since the allocator have total
+/// control of the underlying [`BStack`] and the file layout, violating these requirements may
+/// lead to undefined behavior such as header corruption, incorrect checksum calculations, and
+/// potential security vulnerabilities.
+pub unsafe trait ReservedAllocator {
+    const RESERVED_SIZE: u64 = 0;
+}
+
+unsafe impl ReservedAllocator for BinAlloc {
+    const RESERVED_SIZE: u64 = RESERVED_SIZE;
+}
+
+// Check this each breaking change of Bstack
+/// Safety: Documentation of FirstFitBStackAllocator specifies that 16 bytes are reserved
+unsafe impl ReservedAllocator for FirstFitBStackAllocator {
+    const RESERVED_SIZE: u64 = 16;
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Debug)]

@@ -88,6 +88,7 @@ const BIN_POINTERS_END: u64 = BIN_POINTERS_OFFSET + BIN_POINTERS_SIZE;
 const BLOCK_HEADER_SIZE: u64 = 16;
 
 const MIN_BIN: usize = 5;
+const MAX_SPLIT_ATTEMPT: u32 = 5;
 const MAX_BLOCK_CLASS: u32 = 64;
 
 fn write_checksum(buf: &mut [u8]) {
@@ -522,9 +523,80 @@ impl BinAlloc {
         write_checksum(old_data);
 
         if head == 0 {
-            // TODO: try to split from existing larger blocks before extending the file
+            // Case 1.5: empty bin — try to split a block from a larger bin
+            let mut larger_class = block_class + 1;
+            while larger_class <= MAX_BLOCK_CLASS.min(block_class + MAX_SPLIT_ATTEMPT) {
+                let larger_bin_offset = Self::find_bin_offset(larger_class);
+                let mut split_buf = [0u8; 8];
+                self.stack.get_into(larger_bin_offset, &mut split_buf)?;
+                let split_head = u64::from_le_bytes(split_buf);
+                if split_head != 0 {
+                    if !Self::is_valid_block_offset(split_head) {
+                        return Err(Error::stdio_corruption(format!(
+                            "invalid block offset {split_head} in bin pointer at offset {larger_bin_offset}"
+                        )));
+                    }
 
-            // Case 1: empty bin, need to allocate a new block at the end of the file
+                    // Pop split_head from larger_class bin, read its next pointer
+                    self.stack
+                        .get_into(split_head + BLOCK_HEADER_SIZE, &mut split_buf)?;
+                    let next = u64::from_le_bytes(split_buf);
+
+                    // Write old_data to split_head (allocates it as the new block)
+                    self.stack.set(split_head, old_data)?;
+
+                    // Compute the bin for the old block to free
+                    let old_class =
+                        Self::block_class_for(old_data.len() as u64 - BLOCK_HEADER_SIZE);
+                    let old_bin_offset = Self::find_bin_offset_in_slice(old_class);
+
+                    if old_ptr_to_free != 0 {
+                        // Mark old block free before zeroing bin pointers
+                        // Recover B: Correct list, block free marker (of the split block) not present
+                        self.write_free_block(old_ptr_to_free, old_class)?;
+                    }
+
+                    // Load, zero, and rebuild the bin pointer region
+                    // Recover B: Correct list, block free marker (of the split block) not present
+                    // Recover O: Orphaned block
+                    let mut free_list_buf =
+                        vec![0u8; (BIN_POINTERS_END - BIN_POINTERS_OFFSET + 4) as usize];
+                    self.stack
+                        .get_into(BIN_POINTERS_OFFSET - 4, &mut free_list_buf)?;
+                    self.stack.zero(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
+
+                    // Update larger_class bin to point to the block after split_head
+                    let larger_slice = Self::find_bin_offset_in_slice(larger_class);
+                    free_list_buf[larger_slice..larger_slice + 8]
+                        .copy_from_slice(&next.to_le_bytes());
+
+                    // Split the remainder into free blocks and add them to their bins
+                    for k in block_class..larger_class {
+                        let free_offset = split_head + (1u64 << k);
+                        self.write_free_block(free_offset, k)?;
+                        let bin_slice_offset = Self::find_bin_offset_in_slice(k);
+                        free_list_buf[bin_slice_offset..bin_slice_offset + 8]
+                            .copy_from_slice(&free_offset.to_le_bytes());
+                    }
+
+                    if old_ptr_to_free != 0 {
+                        free_list_buf[old_bin_offset..old_bin_offset + 8]
+                            .copy_from_slice(&old_ptr_to_free.to_le_bytes());
+                    }
+
+                    // Recover A: Missing bin pointers
+                    write_checksum(&mut free_list_buf);
+                    self.stack.set(BIN_POINTERS_OFFSET - 4, &free_list_buf)?;
+
+                    // Recover X: Incorrect header checksum but correct pointer checksum
+                    rechecksum(&self.stack, ALLOC_OFFSET, BIN_POINTERS_OFFSET)?;
+
+                    return Ok(split_head);
+                }
+                larger_class += 1;
+            }
+
+            // Case 1: empty bin and no larger block to split, extend the file
             let mut new_slice = vec![0u8; block_size as usize];
             new_slice[..old_data.len()].copy_from_slice(old_data);
 

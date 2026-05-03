@@ -488,12 +488,12 @@ impl BinAlloc {
 
     #[inline]
     fn find_bin_offset(block_class: u32) -> u64 {
-        ALLOC_OFFSET + HEADER_SIZE + (block_class * 8u32) as u64
+        BIN_POINTERS_OFFSET + ((block_class - MIN_BIN as u32) * 8) as u64
     }
 
     #[inline]
     fn find_bin_offset_in_slice(block_class: u32) -> usize {
-        (block_class * 8u32) as usize + 4 // +4 to skip the checksum for the bin pointer region
+        ((block_class - MIN_BIN as u32) * 8) as usize + 4 // +4 to skip the checksum for the bin pointer region
     }
 
     /// Precondition:

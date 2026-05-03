@@ -417,7 +417,58 @@ impl BinAlloc {
                 // Recover orphans
                 if should_rebuild_free_list {
                     stack.zero(BIN_POINTERS_OFFSET, BIN_POINTERS_END)?;
-                    todo!()
+
+                    let num_bins = MAX_BLOCK_CLASS as usize - MIN_BIN + 1;
+                    let mut bin_heads = vec![0u64; num_bins];
+                    let total = stack.len()?;
+                    let mut offset = BIN_POINTERS_END;
+
+                    'walk: while offset < total {
+                        if offset + BLOCK_HEADER_SIZE > total {
+                            break;
+                        }
+                        let mut hdr = [0u8; BLOCK_HEADER_SIZE as usize];
+                        if stack.get_into(offset, &mut hdr).is_err() {
+                            break;
+                        }
+                        let block_class = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+                        if block_class < MIN_BIN as u32 || block_class > MAX_BLOCK_CLASS {
+                            break 'walk;
+                        }
+                        let block_size = Self::size_from_class(block_class);
+                        let data_len = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
+
+                        if data_len == block_size && offset + block_size <= total {
+                            let bin_idx = (block_class - MIN_BIN as u32) as usize;
+                            let old_head = bin_heads[bin_idx];
+                            match stack.get(offset, offset + block_size) {
+                                Ok(mut block_buf) => {
+                                    block_buf[BLOCK_HEADER_SIZE as usize
+                                        ..(BLOCK_HEADER_SIZE + 8) as usize]
+                                        .copy_from_slice(&old_head.to_le_bytes());
+                                    write_checksum(&mut block_buf);
+                                    if stack.set(offset, &block_buf).is_ok() {
+                                        bin_heads[bin_idx] = offset;
+                                    }
+                                }
+                                Err(_) => break 'walk,
+                            }
+                        }
+
+                        offset += block_size;
+                    }
+
+                    let mut free_list_buf =
+                        vec![0u8; (BIN_POINTERS_END - BIN_POINTERS_OFFSET + 4) as usize];
+                    stack.get_into(BIN_POINTERS_OFFSET - 4, &mut free_list_buf)?;
+                    for (i, &head) in bin_heads.iter().enumerate() {
+                        let slice_off = i * 8 + 4;
+                        free_list_buf[slice_off..slice_off + 8]
+                            .copy_from_slice(&head.to_le_bytes());
+                    }
+                    write_checksum(&mut free_list_buf);
+                    stack.set(BIN_POINTERS_OFFSET - 4, &free_list_buf)?;
+                    rechecksum(&stack, ALLOC_OFFSET, BIN_POINTERS_OFFSET)?;
                 }
             }
 

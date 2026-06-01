@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "bstack"
-version = "0.1.6"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78460a95c3508e31d6a5191f2fecceca00ff8e2f2851542523bf66bc9635f7b0"
+checksum = "dd08f388a153161b5448462ab36d407287801e3fbff7a12197d093ba03c82f83"
 dependencies = [
  "libc",
  "windows-sys",

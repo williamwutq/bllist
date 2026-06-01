@@ -266,6 +266,7 @@
 
 pub mod allocator;
 pub mod block;
+pub mod cairnalloc;
 pub mod dynamic;
 pub mod dynamic_dbl;
 pub mod error;

@@ -593,12 +593,13 @@ impl BinAlloc {
                         .get_into(split_head + BLOCK_HEADER_SIZE, &mut split_buf)?;
                     let next = u64::from_le_bytes(split_buf);
 
+                    let old_len = old_data.len();
+
                     // Write old_data to split_head (allocates it as the new block)
                     self.stack.set(split_head, old_data)?;
 
                     // Compute the bin for the old block to free
-                    let old_class =
-                        Self::block_class_for(old_data.len() as u64 - BLOCK_HEADER_SIZE);
+                    let old_class = Self::block_class_for(old_len as u64 - BLOCK_HEADER_SIZE);
                     let old_bin_offset = Self::find_bin_offset_in_slice(old_class);
 
                     if old_ptr_to_free != 0 {
@@ -666,11 +667,13 @@ impl BinAlloc {
                 .get_into(head + BLOCK_HEADER_SIZE, &mut head_buf)?; // head_buf is reused
             let next = u64::from_le_bytes(head_buf);
 
+            let old_len = old_data.len();
+
             // Write the old data to the popped block
             self.stack.set(head, old_data)?;
 
             // Compute the bin for the old block to free
-            let old_class = Self::block_class_for(old_data.len() as u64 - BLOCK_HEADER_SIZE);
+            let old_class = Self::block_class_for(old_len as u64 - BLOCK_HEADER_SIZE);
             let old_bin_offset = Self::find_bin_offset_in_slice(old_class);
 
             if old_ptr_to_free != 0 {
@@ -811,6 +814,8 @@ impl BinAlloc {
 }
 
 impl BStackAllocator for BinAlloc {
+    type Error = io::Error;
+    type Allocated<'a> = BStackSlice<'a, Self>;
     fn stack(&self) -> &BStack {
         &self.stack
     }
@@ -822,7 +827,7 @@ impl BStackAllocator for BinAlloc {
     fn alloc(&self, len: u64) -> Result<BStackSlice<'_, Self>, std::io::Error> {
         let zero_buf = &mut [0u8; BLOCK_HEADER_SIZE as usize];
         let offset = Self::alloc_block(self, len, zero_buf, 0)?;
-        Ok(BStackSlice::new(self, offset + BLOCK_HEADER_SIZE, len))
+        Ok(unsafe { BStackSlice::from_raw_parts(self, offset + BLOCK_HEADER_SIZE, len) })
     }
 
     fn realloc<'a>(
@@ -841,16 +846,17 @@ impl BStackAllocator for BinAlloc {
 
         if new_block_class <= block_class {
             self.resize_block(old_ptr, new_len)?;
-            Ok(BStackSlice::new(self, slice.start(), new_len))
+            // SAFETY: The resized block is guaranteed to be at the same offset with the same or smaller size
+            Ok(unsafe { BStackSlice::from_raw_parts(self, slice.start(), new_len) })
         } else {
             // Prepare data to copy to the new block
             let mut old_data_buf = self.stack.get(old_ptr, slice.start() + len)?;
             let new_offset = Self::alloc_block(self, new_len, &mut old_data_buf, old_ptr)?;
-            Ok(BStackSlice::new(
-                self,
-                new_offset + BLOCK_HEADER_SIZE,
-                new_len,
-            ))
+            // SAFETY: The old block is not freed until the new block is allocated and the content is copied,
+            // and the new block is guaranteed to be at a different offset with enough size to hold the new_len
+            Ok(unsafe {
+                BStackSlice::from_raw_parts(self, new_offset + BLOCK_HEADER_SIZE, new_len)
+            })
         }
     }
 

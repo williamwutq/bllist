@@ -206,7 +206,7 @@ impl<const PAYLOAD_CAPACITY: usize> FixedDblList<PAYLOAD_CAPACITY> {
                 tail: 0,
                 free_head: 0,
             };
-            let offset = stack.push(&h.to_bytes())?;
+            let offset = stack.push(h.to_bytes())?;
             debug_assert_eq!(offset, 0, "bllist-dbl header must land at logical offset 0");
             return Ok(Self {
                 stack,
@@ -572,7 +572,7 @@ impl<const PAYLOAD_CAPACITY: usize> FixedDblList<PAYLOAD_CAPACITY> {
     }
 
     fn write_header_locked(&self, header: &Header) -> Result<(), Error> {
-        self.stack.set(0, &header.to_bytes())?;
+        self.stack.set(0, header.to_bytes())?;
         Ok(())
     }
 
@@ -741,7 +741,7 @@ impl<const PAYLOAD_CAPACITY: usize> FixedDblList<PAYLOAD_CAPACITY> {
         }
 
         if found_orphan || tail_changed {
-            stack.set(0, &header.to_bytes())?;
+            stack.set(0, header.to_bytes())?;
         }
 
         Ok(())

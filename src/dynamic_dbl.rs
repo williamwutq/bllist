@@ -240,7 +240,7 @@ impl DynamicDblList {
                 tail: 0,
                 bin_heads: [0u64; NUM_BINS],
             };
-            let offset = stack.push(&hdr.to_bytes())?;
+            let offset = stack.push(hdr.to_bytes())?;
             debug_assert_eq!(
                 offset, 0,
                 "DynamicDblList header must land at logical offset 0"
@@ -696,7 +696,7 @@ impl DynamicDblList {
     }
 
     fn write_header_locked(&self, header: &DynDblHeader) -> Result<(), Error> {
-        self.stack.set(0, &header.to_bytes())?;
+        self.stack.set(0, header.to_bytes())?;
         Ok(())
     }
 
@@ -949,7 +949,7 @@ impl DynamicDblList {
 
         if free_blocks.is_empty() {
             if tail_changed {
-                stack.set(0, &header.to_bytes())?;
+                stack.set(0, header.to_bytes())?;
             }
             return Ok(());
         }
@@ -981,7 +981,7 @@ impl DynamicDblList {
 
         // Phase 1: zero all bin heads and flush (crash-safe).
         header.bin_heads = [0u64; NUM_BINS];
-        stack.set(0, &header.to_bytes())?;
+        stack.set(0, header.to_bytes())?;
 
         // Phase 2: write each free block and rebuild bin_heads.
         for &(off, bs) in &merged {
@@ -1001,7 +1001,7 @@ impl DynamicDblList {
         }
 
         // Phase 3: write the populated header (including corrected tail).
-        stack.set(0, &header.to_bytes())?;
+        stack.set(0, header.to_bytes())?;
 
         Ok(())
     }

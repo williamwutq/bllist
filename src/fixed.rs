@@ -195,7 +195,7 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
                 root: 0,
                 free_list_head: 0,
             };
-            let offset = stack.push(&h.to_bytes())?;
+            let offset = stack.push(h.to_bytes())?;
             debug_assert_eq!(offset, 0, "bllist header must land at logical offset 0");
             return Ok(Self {
                 stack,
@@ -489,7 +489,7 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
 
     /// Write the 24-byte bllist header. Caller must hold `mu`.
     fn write_header_locked(&self, header: &Header) -> Result<(), Error> {
-        self.stack.set(0, &header.to_bytes())?;
+        self.stack.set(0, header.to_bytes())?;
         Ok(())
     }
 
@@ -627,7 +627,7 @@ impl<const PAYLOAD_CAPACITY: usize> FixedBlockList<PAYLOAD_CAPACITY> {
         }
 
         if found_orphan {
-            stack.set(0, &header.to_bytes())?;
+            stack.set(0, header.to_bytes())?;
         }
 
         Ok(())

@@ -354,7 +354,7 @@ impl DynamicBlockList {
                 root: 0,
                 bin_heads: [0u64; NUM_BINS],
             };
-            let offset = stack.push(&hdr.to_bytes())?;
+            let offset = stack.push(hdr.to_bytes())?;
             debug_assert_eq!(
                 offset, 0,
                 "dynamic-list header must land at logical offset 0"
@@ -819,7 +819,7 @@ impl DynamicBlockList {
     }
 
     fn write_header_locked(&self, header: &DynHeader) -> Result<(), Error> {
-        self.stack.set(0, &header.to_bytes())?;
+        self.stack.set(0, header.to_bytes())?;
         Ok(())
     }
 
@@ -1098,7 +1098,7 @@ impl DynamicBlockList {
         // Phase 1: zero all bin heads in the header and flush.
         // If we crash after this, all non-active blocks are orphans on next open.
         header.bin_heads = [0u64; NUM_BINS];
-        stack.set(0, &header.to_bytes())?;
+        stack.set(0, header.to_bytes())?;
 
         // Phase 2: write each (possibly merged) free block with a new next
         // pointer linking it into its bin, then update bin_heads in memory.
@@ -1119,7 +1119,7 @@ impl DynamicBlockList {
         }
 
         // Phase 3: write the fully populated header.
-        stack.set(0, &header.to_bytes())?;
+        stack.set(0, header.to_bytes())?;
 
         Ok(())
     }

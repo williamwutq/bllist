@@ -350,8 +350,14 @@ impl CairnAlloc {
     }
 
     /// Validates the free block at the given offset for the given class by checking the metadata in the block
-    /// header and tail. Use [0..32) bytes of the shared buffer for reading the metadata. This function should
-    /// be called after we successfully claim a free block.
+    /// header and tail.
+    /// 
+    /// Use [0..32) bytes of the shared buffer for reading the metadata. This function should
+    /// be called after we successfully claim a free block. The function will also attempt to zero the block if
+    /// it is marked as dirty, which means it should be cleaned before handed out. If the block is not marked 
+    /// as dirty, in debug mode, we will check if the block is actually clean by reading through the entire block,
+    /// which can help detect potential use after free issues in the application code or random corruption.
+    /// In release mode, we will trust the metadata and skip this check for performance reasons.
     ///
     /// ## Panics
     ///
@@ -365,7 +371,8 @@ impl CairnAlloc {
         shared_buf: &mut [u8],
     ) -> io::Result<()> {
         let head_offset = offset - 16;
-        let tail_offset = offset + nonzero_into_u64(class.max_data_size());
+        let class_size = nonzero_into_u64(class.max_data_size());
+        let tail_offset = offset + class_size;
 
         // Block validation. We can check the metadata in the block header and tail to make sure the block is not corrupted
         self.stack.get_into(head_offset, &mut shared_buf[0..16])?;
@@ -382,14 +389,16 @@ impl CairnAlloc {
                 // It is highly likely that this is an application level buffer overflow issue
                 #[cfg(debug_assertions)]
                 panic! {
-                    "Corrupted block found in at offset {}, indicating a buffer overflow issue and an use after free in the application code while using the block or random corruption",
+                    "Corrupted block found in at offset {}, indicating a buffer overflow issue and an use after free \
+                    in the application code while using the block or random corruption",
                     offset
                 }
                 #[cfg(not(debug_assertions))]
                 Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "Corrupted block found in at offset {}, indicating a buffer overflow issue and an use after free in the application code while using the block or random corruption",
+                        "Corrupted block found in at offset {}, indicating a buffer overflow issue and an use after free \
+                        in the application code while using the block or random corruption",
                         current_head
                     ),
                 ))?
@@ -446,6 +455,52 @@ impl CairnAlloc {
                     offset
                 ),
             ))?
+        }
+        if block_meta_head & ALLOC_DIRTY_FLAG != 0 {
+            self.stack.zero(offset, class_size)?;
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                let mut fault = 0u64;
+                let mut cursor = offset;
+                self.stack.get_batched_gen(|| {
+                    // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
+                    let res = (cursor, unsafe { escape_slice(&mut shared_buf[..32]) });
+                    if cursor == offset {
+                        cursor += 32;
+                        Some(res)
+                    } else {
+                        if cursor + 32 == offset {
+                            // The first 8 bytes may contain the pointer to the next free block,
+                            // but the rest should be zero
+                            if shared_buf[8..32] != [0u8; 24] {
+                                fault = cursor
+                                    + 8
+                                    + shared_buf[8..32].iter().position(|&b| b != 0).unwrap()
+                                        as u64;
+                            }
+                        } else if shared_buf[..32] != [0u8; 32] {
+                            fault =
+                                cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
+                            return None;
+                        }
+                        cursor += 32;
+                        if cursor >= offset + class_size {
+                            None
+                        } else {
+                            Some(res)
+                        }
+                    }
+                })?;
+                if fault != 0 {
+                    panic!(
+                        "Corrupted block found in at offset {}: block is not marked as dirty but contains non-zero data \
+                        at stack offset {}, indicating a potential use after free issue in the application code, a random 
+                        corruption, or an error in cairnalloc logic",
+                        offset, fault
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -504,11 +559,6 @@ impl BStackAllocator for CairnAlloc {
                 // After CAS succeeds, we know that other threads cannot touch the block we already allocated
                 // So now we can freely issue calls
                 self.validate_free_block(class, current_head, shared_buf)?;
-                let block_meta = u64::from_le_bytes(shared_buf[0..8].try_into().unwrap());
-
-                if block_meta & ALLOC_DIRTY_FLAG != 0 {
-                    self.stack.zero(current_head, class_max_size)?;
-                }
 
                 // Write block head metadata: the first 8 bytes are the size with flags, the next 8 bytes are the used size
                 // If this operation fails, the block is orphaned
@@ -560,12 +610,7 @@ impl BStackAllocator for CairnAlloc {
                         &ptr_read_buf,
                     )?
                 {
-                    self.validate_free_block(class, current_head, shared_buf)?;
-                    let block_meta = u64::from_le_bytes(shared_buf[0..8].try_into().unwrap());
-
-                    if block_meta & ALLOC_DIRTY_FLAG != 0 {
-                        self.stack.zero(current_head, larger_class_max_size)?;
-                    }
+                    self.validate_free_block(larger_class, current_head, shared_buf)?;
 
                     let fake_meta = // First write as if the entire block is in use
                         &(Self::size_to_disk_size(larger_class_max_size) | ALLOC_IS_SORTED_FLAG | ALLOC_IN_USE_FLAG | ALLOC_DIRTY_FLAG)

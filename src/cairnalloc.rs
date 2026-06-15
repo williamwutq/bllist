@@ -321,7 +321,8 @@ impl CairnAlloc {
                 format!("Stack too small for allocator: {} bytes", stack_len),
             ))
         } else if stack_len % 32 != 0 {
-            // TODO: This might be repairable
+            // This is not repairable and is definitely caused by some kind of corruption,
+            // since block tails are required to be complete.
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -351,10 +352,10 @@ impl CairnAlloc {
 
     /// Validates the free block at the given offset for the given class by checking the metadata in the block
     /// header and tail.
-    /// 
+    ///
     /// Use [0..32) bytes of the shared buffer for reading the metadata. This function should
     /// be called after we successfully claim a free block. The function will also attempt to zero the block if
-    /// it is marked as dirty, which means it should be cleaned before handed out. If the block is not marked 
+    /// it is marked as dirty, which means it should be cleaned before handed out. If the block is not marked
     /// as dirty, in debug mode, we will check if the block is actually clean by reading through the entire block,
     /// which can help detect potential use after free issues in the application code or random corruption.
     /// In release mode, we will trust the metadata and skip this check for performance reasons.
@@ -503,6 +504,82 @@ impl CairnAlloc {
             }
         }
         Ok(())
+    }
+
+    /// Split a block from a mutex-protected unsorted list
+    ///
+    /// Call to this method must be protected by the corresponding unsorted list mutex, and the caller must ensure
+    /// that the block at the given offset is valid and big enough for splitting. This method will attempt to split
+    /// the block into an allocated block of the requested size and a remaining free block, and write the
+    /// corresponding metadata to both blocks. If the remaining free block is big enough, it will also try to link
+    /// it into the appropriate free list atomically or protected under a mutex.
+    ///
+    /// Providing incorrect class may lead to deadlock.
+    ///
+    /// Anticipate shared_buf to be zero in [32, 64) range
+    fn split_block(
+        &self,
+        class: AllocClass,
+        offset: u64,
+        current_size: u64,
+        requested_size: u64,
+        shared_buf: &mut [u8],
+    ) -> io::Result<()> {
+        // First align requested size
+        let aligned_size = align_32(requested_size);
+        let free_block_size = current_size - aligned_size - 32;
+        let free_class =
+            AllocClass::free_from_size(free_block_size)
+            .expect("Free block should be big enough for at least 32 bytes of data and 32 bytes of metadata");
+
+        let fake_meta = // First write as if the entire block is in use
+            &(Self::size_to_disk_size(current_size) | ALLOC_IN_USE_FLAG | ALLOC_DIRTY_FLAG)
+            .to_le_bytes();
+        let real_meta = // Then we will fix the metadata after we successfully claim the block
+            &(Self::size_to_disk_size(aligned_size) | ALLOC_IN_USE_FLAG).to_le_bytes();
+        let free_block_meta = &(if free_class.is_exact_size() {
+            0u64 | ALLOC_IS_SORTED_FLAG
+        } else {
+            0u64
+        })
+        .to_le_bytes();
+        let free_offset = offset + 16 + aligned_size;
+        shared_buf[0..8].copy_from_slice(fake_meta);
+        shared_buf[8..16].copy_from_slice(&current_size.to_le_bytes());
+        shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+        self.stack.set(offset - 16, &shared_buf[0..24])?;
+
+        // Write block tail metadata and the entire outer block
+        shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
+        shared_buf[8..16].copy_from_slice(real_meta);
+        shared_buf[16..24].copy_from_slice(&free_offset.to_le_bytes());
+        shared_buf[24..32].copy_from_slice(&[0u8; 8]);
+        // shared_buf[32..48] should be zero
+        shared_buf[48..52].copy_from_slice(free_block_meta);
+        // shared_buf[52..64] should be zero to indicate no data in the free block
+        shared_buf[64..72].copy_from_slice(&ALLOC_MARKER_BE);
+        shared_buf[72..80].copy_from_slice(free_block_meta);
+        self.stack.set(offset + aligned_size, &shared_buf[0..80])?;
+
+        // Write the correct metadata to the header
+        shared_buf[0..8].copy_from_slice(real_meta);
+        shared_buf[8..16].copy_from_slice(&requested_size.to_le_bytes());
+        self.stack.set(offset - 16, &shared_buf[0..16])?;
+
+        // Link the free block. Duplicating call to link in both branches because I'm
+        // too lazy to manually drop mutex and the scope correctly protects it
+        // the free_class == class here solely exists to avoid reentry of the mutex
+        // which is not reentrant and will cause deadlock.
+        if free_class == class || free_class.is_exact_size() {
+            self.try_link_free_block_unchecked(free_class, free_offset)
+        } else {
+            let _guard = match class {
+                AllocClass::MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
+                AllocClass::LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
+                _ => unreachable!(),
+            };
+            self.try_link_free_block_unchecked(free_class, free_offset)
+        }
     }
 }
 
@@ -713,7 +790,7 @@ impl BStackAllocator for CairnAlloc {
                         &shared_buf[0..16],
                     )?;
                 } else {
-                    todo!("TODO splitting")
+                    self.split_block(class, current_head, block_len, len, shared_buf)?;
                 }
                 Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) })
             } else {
@@ -777,13 +854,34 @@ impl BStackAllocator for CairnAlloc {
         })?;
 
         if current_head != 0 {
-            // TODO Block validation
+            self.validate_free_block(AllocClass::MediumUnsorted, current_head, shared_buf)?;
+            let block_len = Self::disk_size_to_size(u64::from_le_bytes(
+                wptr_read_buf[0..8].try_into().unwrap(),
+            ));
             // We found something
-            todo!(
-                "Medium allocation with best block at offset {} with size {}",
-                best_block_offset,
-                best_block_size
-            )
+            if block_len - len < 64 {
+                // This block is not worth splitting, we will just use the entire block
+                let meta =
+                    u64::from_le_bytes(wptr_read_buf[0..8].try_into().unwrap()) | ALLOC_IN_USE_FLAG;
+                shared_buf[0..8].copy_from_slice(&meta.to_le_bytes());
+                shared_buf[8..16].copy_from_slice(&len.to_le_bytes());
+                shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+                self.stack.set(current_head - 16, &shared_buf[0..24])?;
+
+                shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
+                shared_buf[8..16].copy_from_slice(&meta.to_le_bytes());
+                self.stack
+                    .set(current_head - 16 + block_len, &shared_buf[0..16])?;
+            } else {
+                self.split_block(
+                    AllocClass::MediumUnsorted,
+                    current_head,
+                    block_len,
+                    len,
+                    shared_buf,
+                )?;
+            }
+            Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) })
         } else {
             drop(mum_guard);
             let ptr = self.stack.extend(actual_size)?; // 32 bytes for metadata

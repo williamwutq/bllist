@@ -1,10 +1,27 @@
 use bstack::{BStack, BStackAllocator, BStackSlice, FirstFitBStackAllocator};
 
-use std::{
-    io::{self, Write},
-    num::NonZeroU64,
-    sync::Mutex,
-};
+use std::{io, num::NonZeroU64, sync::Mutex};
+
+/// In debug builds, panics immediately to give you a stack trace and a core dump.
+/// In release builds, returns an `Err(io::Error)` so the caller can handle it gracefully.
+macro_rules! debug_panic_or_io_err {
+    ($kind:ident, $fmt:literal $(, $arg:expr)*) => {{
+        #[cfg(debug_assertions)]
+        panic!($fmt $(, $arg)*);
+
+        #[cfg(not(debug_assertions))]
+        return Err(io::Error::new(
+            io::ErrorKind::$kind,
+            format!($fmt $(, $arg)*),
+        ))?;
+    }};
+}
+
+macro_rules! get_le {
+    ($buf:expr; $t:ty) => {
+        <$t>::from_le_bytes((&$buf).try_into().unwrap())
+    };
+}
 
 /// The magic prefix for the allocator header, used to identify the file format
 const ALCR_MAGIC_PREFIX: [u8; 4] = *b"ALCR";
@@ -270,7 +287,7 @@ impl CairnAlloc {
             ));
         }
         // Parse version
-        let version = u32::from_le_bytes(buf[4..].try_into().unwrap());
+        let version = get_le!(buf[4..]; u32);
         // Support anything 0.1.x, but reject incompatible versions
         if version & VERSION_MASK != ALCR_VERSION & VERSION_MASK {
             return Err(io::Error::new(
@@ -305,6 +322,8 @@ impl CairnAlloc {
     }
 
     /// Converts a size stored on disk back to the actual size
+    ///
+    /// This method will never overflow u64
     fn disk_size_to_size(disk_size: u64) -> u64 {
         (disk_size & 0x3FFFFFFFFFFFFFF) * 32
     }
@@ -378,7 +397,7 @@ impl CairnAlloc {
         // Block validation. We can check the metadata in the block header and tail to make sure the block is not corrupted
         self.stack.get_into(head_offset, &mut shared_buf[0..16])?;
         self.stack.get_into(tail_offset, &mut shared_buf[16..32])?;
-        let block_meta_head = u64::from_le_bytes(shared_buf[0..8].try_into().unwrap());
+        let block_meta_head = get_le!(shared_buf[0..8]; u64);
         if shared_buf[16..24] != ALLOC_MARKER_LE {
             if shared_buf[16..24] == ALLOC_MARKER_BE {
                 #[cfg(debug_assertions)]
@@ -388,21 +407,12 @@ impl CairnAlloc {
                 );
             } else {
                 // It is highly likely that this is an application level buffer overflow issue
-                #[cfg(debug_assertions)]
-                panic! {
-                    "Corrupted block found in at offset {}, indicating a buffer overflow issue and an use after free \
+                debug_panic_or_io_err!(
+                    InvalidData,
+                    "Corrupted block found at offset {}, indicating a buffer overflow issue and an use after free \
                     in the application code while using the block or random corruption",
                     offset
-                }
-                #[cfg(not(debug_assertions))]
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Corrupted block found in at offset {}, indicating a buffer overflow issue and an use after free \
-                        in the application code while using the block or random corruption",
-                        current_head
-                    ),
-                ))?
+                );
             }
         }
         #[cfg(debug_assertions)]
@@ -443,19 +453,11 @@ impl CairnAlloc {
         }
         if block_meta_head & ALLOC_IN_USE_FLAG == 0 || shared_buf[0..8] != [0u8; 8] {
             // Used block in free list or corrupted block, should not happen
-            #[cfg(debug_assertions)]
-            panic!(
-                "Corrupted block found in at offset {}: in-use flag is not set or block marker is not zero",
+            debug_panic_or_io_err!(
+                InvalidData,
+                "Corrupted block found at offset {}: in-use flag is not set or block marker is not zero",
                 offset
             );
-            #[cfg(not(debug_assertions))]
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Corrupted block found at offset {}: in-use flag is not set or block marker is not zero",
-                    offset
-                ),
-            ))?
         }
         if block_meta_head & ALLOC_DIRTY_FLAG != 0 {
             self.stack.zero(offset, class_size)?;
@@ -753,8 +755,8 @@ impl BStackAllocator for CairnAlloc {
                     Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
                 } else {
                     prev_addr = current_head;
-                    current_head = u64::from_le_bytes(wptr_read_buf[16..24].try_into().unwrap());
-                    let block_meta = u64::from_le_bytes(wptr_read_buf[0..8].try_into().unwrap());
+                    current_head = get_le!(wptr_read_buf[16..24]; u64);
+                    let block_meta = get_le!(wptr_read_buf[0..8]; u64);
                     let current_len = Self::disk_size_to_size(block_meta);
                     #[cfg(debug_assertions)]
                     if block_meta & ALLOC_IS_SORTED_FLAG != 0 {
@@ -771,13 +773,10 @@ impl BStackAllocator for CairnAlloc {
             })?;
             return if current_head != 0 {
                 self.validate_free_block(class, current_head, shared_buf)?;
-                let block_len = Self::disk_size_to_size(u64::from_le_bytes(
-                    wptr_read_buf[0..8].try_into().unwrap(),
-                ));
+                let block_len = Self::disk_size_to_size(get_le!(wptr_read_buf[0..8]; u64));
                 if block_len - len < 64 {
                     // This block is not worth splitting, we will just use the entire block
-                    let meta = u64::from_le_bytes(wptr_read_buf[0..8].try_into().unwrap())
-                        | ALLOC_IN_USE_FLAG;
+                    let meta = get_le!(wptr_read_buf[0..8]; u64) | ALLOC_IN_USE_FLAG;
                     shared_buf[0..8].copy_from_slice(&meta.to_le_bytes());
                     shared_buf[8..16].copy_from_slice(&len.to_le_bytes());
                     shared_buf[16..24].copy_from_slice(&[0u8; 8]);
@@ -810,7 +809,6 @@ impl BStackAllocator for CairnAlloc {
         }
 
         current_head = AllocClass::MediumUnsorted.index_bin();
-        prev_addr = current_head;
         let mut best_block_offset = 0u64;
         let mut best_block_size = 18400u64; // The maximum size for medium unsorted class
         // Tranversing the entire list and try to find a good fit
@@ -830,10 +828,8 @@ impl BStackAllocator for CairnAlloc {
                 // SAFETY: Slice `wptr_read_buf` lives for the duration of the get_batched_gen call
                 Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
             } else {
-                current_head = u64::from_le_bytes(wptr_read_buf[16..24].try_into().unwrap());
-                let current_size = Self::disk_size_to_size(u64::from_le_bytes(
-                    wptr_read_buf[0..8].try_into().unwrap(),
-                ));
+                current_head = get_le!(wptr_read_buf[16..24]; u64);
+                let current_size = Self::disk_size_to_size(get_le!(wptr_read_buf[0..8]; u64));
                 if current_size >= len {
                     let d = current_size - align_32(len);
                     if d < 16 || (d >= 64 && d <= 256) {
@@ -855,14 +851,11 @@ impl BStackAllocator for CairnAlloc {
 
         if current_head != 0 {
             self.validate_free_block(AllocClass::MediumUnsorted, current_head, shared_buf)?;
-            let block_len = Self::disk_size_to_size(u64::from_le_bytes(
-                wptr_read_buf[0..8].try_into().unwrap(),
-            ));
+            let block_len = Self::disk_size_to_size(get_le!(wptr_read_buf[0..8]; u64));
             // We found something
             if block_len - len < 64 {
                 // This block is not worth splitting, we will just use the entire block
-                let meta =
-                    u64::from_le_bytes(wptr_read_buf[0..8].try_into().unwrap()) | ALLOC_IN_USE_FLAG;
+                let meta = get_le!(wptr_read_buf[0..8]; u64) | ALLOC_IN_USE_FLAG;
                 shared_buf[0..8].copy_from_slice(&meta.to_le_bytes());
                 shared_buf[8..16].copy_from_slice(&len.to_le_bytes());
                 shared_buf[16..24].copy_from_slice(&[0u8; 8]);
@@ -914,6 +907,250 @@ impl BStackAllocator for CairnAlloc {
     }
 
     fn dealloc(&self, slice: BStackSlice<'_, Self>) -> io::Result<()> {
+        if slice.is_empty() {
+            return Ok(());
+        }
+        // Shared buffer for unknown purposes
+        let current_offset = slice.start();
+        if current_offset < ALLOC_DATA_START + 16 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid deallocation: offset {} is out of bounds",
+                    current_offset
+                ),
+            ));
+        }
+        // From this point on, current_offset - 32 is safe
+        let shared_buf = &mut [0u8; 32];
+        enum DeallocState {
+            ReadHead,
+            ReadTail,
+            Validate,
+            ValidateOnlyCurrentTail,
+            ValidateNextBlockTail,
+            ChecksOk,
+            ErrInvalidDeallocationLen(u64),
+            ErrDoubleFree,
+            ErrBlockCorrupted(u64),
+            ErrSuspectBufferOverflow(u64),
+            ErrWrongDeadbeefInFreedBlock(u64),
+            ErrWrongDeadbeefInUsedBlock(u64),
+        }
+        let state = &mut DeallocState::ReadHead;
+        let mut current_block_meta = 0u64;
+        let mut prev_block_meta = 0u64;
+        let mut next_block_meta = 0u64;
+        let stack_len = self.stack.len()?;
+        // We read the head meta of the current block and the tail meta of the previous block first
+        // Then, according to size data, we read the tail meta of the current block and the head meta of the next block
+        self.stack.get_batched_gen(|| {
+            loop {
+                match state {
+                    DeallocState::ReadHead => {
+                        // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
+                        let res = (current_offset - 32, unsafe { escape_slice(shared_buf) });
+                        *state = DeallocState::ReadTail;
+                        return Some(res);
+                    }
+                    DeallocState::ReadTail => {
+                        let prev_block_deadbeef: [u8; 8] = shared_buf[0..8].try_into().unwrap();
+                        prev_block_meta = get_le!(shared_buf[8..16]; u64);
+                        current_block_meta = get_le!(shared_buf[16..24]; u64);
+                        let current_block_in_use_len = get_le!(shared_buf[24..32]; u64);
+                        if current_block_in_use_len != slice.len() {
+                            // Invalid deallocation
+                            *state =
+                                DeallocState::ErrInvalidDeallocationLen(current_block_in_use_len);
+                            continue;
+                        }
+                        if current_offset - 16 > ALLOC_DATA_START {
+                            // Not the first block
+                            let prev_block_size = Self::disk_size_to_size(prev_block_meta);
+                            let a = current_offset - 32; // This is unchecked because we have done basic checks
+                            match a.checked_sub(prev_block_size) {
+                                Some(prev_offset) if prev_offset < ALLOC_DATA_START => {
+                                    if prev_block_deadbeef != ALLOC_MARKER_BE || prev_block_deadbeef != ALLOC_MARKER_LE {
+                                        // It is highly likely that this is an application level buffer overflow issue
+                                        *state = DeallocState::ErrSuspectBufferOverflow(prev_offset);
+                                        continue;
+                                    }
+                                    let prev_block_in_use = prev_block_meta & ALLOC_IN_USE_FLAG != 0;
+                                    if prev_block_in_use {
+                                        if prev_block_deadbeef == ALLOC_MARKER_LE {
+                                            *state = DeallocState::ErrWrongDeadbeefInUsedBlock(prev_offset);
+                                            continue;
+                                        }
+                                    } else {
+                                        if prev_block_deadbeef == ALLOC_MARKER_BE {
+                                            *state =
+                                            DeallocState::ErrWrongDeadbeefInFreedBlock(prev_offset);
+                                            continue;
+                                        }
+                                    }
+                                },
+                                _ => {
+                                    // Invalid previous block offset, do n ot use it
+                                    prev_block_meta = 0;
+                                }
+                            }
+                        } else {
+                            // Do not use a previous block that does not exist
+                            // Thus, previous block meta is empty
+                            prev_block_meta = 0;
+                        }
+                        let current_block_size = Self::disk_size_to_size(current_block_meta);
+                        if current_block_size < slice.len() {
+                            // Invalid deallocation, the block is too small for the slice
+                            *state = DeallocState::ErrBlockCorrupted(current_block_size);
+                            continue;
+                        }
+                        if current_block_meta & ALLOC_IN_USE_FLAG == 0 {
+                            // The block is already free, which is a double free issue in the application code
+                            *state = DeallocState::ErrDoubleFree;
+                            continue;
+                        }
+                        // current_block_size has a max of 2^63, so adding 32 will not cause overflow.
+                        if let Some(current_tail_plus_32) = current_offset.checked_add(current_block_size + 32)
+                            && current_tail_plus_32 <= stack_len
+                        {
+                            *state = DeallocState::Validate;
+                            return Some((current_tail_plus_32 - 32, unsafe { escape_slice(shared_buf) }));
+                        } else if let Some(current_tail_plus_16) = current_offset.checked_add(current_block_size + 16)
+                            && current_tail_plus_16 <= stack_len
+                        {
+                            // We can at least read the tail meta of the current block, which is important for validation
+                            *state = DeallocState::ValidateOnlyCurrentTail;
+                            return Some((current_tail_plus_16 - 16, unsafe { escape_slice(&mut shared_buf[..16]) }));
+                        } else {
+                            // Either the block exceeds u64 or the size of the stack, both of which are invalid
+                            *state = DeallocState::ErrBlockCorrupted(current_block_size);
+                        }
+                    }
+                    DeallocState::ValidateOnlyCurrentTail => {
+                        let current_block_deadbeef: [u8; 8] = shared_buf[0..8].try_into().unwrap();
+                        let current_block_meta_tail = get_le!(shared_buf[8..16]; u64);
+                        if current_block_deadbeef != ALLOC_MARKER_BE {
+                            if current_block_deadbeef == ALLOC_MARKER_LE {
+                                *state = DeallocState::ErrWrongDeadbeefInUsedBlock(current_offset);
+                            } else {
+                                *state = DeallocState::ErrSuspectBufferOverflow(current_offset);
+                            }
+                            continue;
+                        }
+                        #[cfg(debug_assertions)]
+                        if current_block_meta_tail != current_block_meta {
+                            panic!(
+                                "Corrupted block found in at offset {}: header and tail metadata do not match",
+                                current_offset
+                            );
+                        } // Otherwise trust the head
+                        // We cannot read the next block, but we can still validate the current block and deallocate it
+                        // At this point, next_block_meta is still zero, which is correct
+                        *state = DeallocState::ChecksOk;
+                        return None;
+                    }
+                    DeallocState::Validate => {
+                        let current_block_deadbeef: [u8; 8] = shared_buf[0..8].try_into().unwrap();
+                        let current_block_meta_tail = get_le!(shared_buf[8..16]; u64);
+                        next_block_meta = get_le!(shared_buf[16..24]; u64);
+                        if current_block_deadbeef != ALLOC_MARKER_BE {
+                            if current_block_deadbeef == ALLOC_MARKER_LE {
+                                *state = DeallocState::ErrWrongDeadbeefInUsedBlock(current_offset);
+                            } else {
+                                *state = DeallocState::ErrSuspectBufferOverflow(current_offset);
+                            }
+                            continue;
+                        }
+                        #[cfg(debug_assertions)]
+                        if current_block_meta_tail != current_block_meta {
+                            panic!(
+                                "Corrupted block found in at offset {}: header and tail metadata do not match",
+                                current_offset
+                            );
+                        } // Otherwise trust the head
+                        // Validate that this size do not exceed length
+                        let a = current_offset + Self::disk_size_to_size(current_block_meta);
+                        // The above is unchecked because current_block_meta has not changed and we have added the same value before
+                        // in ReadTail, which means adding offset and size to get tail will not overflow
+                        let b = 32 + Self::disk_size_to_size(next_block_meta);
+                        // The above is unchecked because next_block_size <= 2^63, which means adding 32 will not cause overflow
+                        return match a.checked_add(b) {
+                            Some(next_block_end) if next_block_end <= stack_len => {
+                                *state = DeallocState::ValidateNextBlockTail;
+                                Some((next_block_end, unsafe { escape_slice(&mut shared_buf[0..16]) }))
+                            }
+                            _ => {
+                                // Invalid next block. We just don't use it
+                                next_block_meta = 0;
+                                None
+                            }
+                        };
+                    }
+                    DeallocState::ValidateNextBlockTail => {
+
+                    }
+                    // The Error variants
+                    _ => return None,
+                }
+            }
+        })?;
+        // Immediately check whether the previous routine was quit cleanly
+        match state {
+            DeallocState::ErrInvalidDeallocationLen(current_len) => {
+                debug_panic_or_io_err!(
+                    InvalidInput,
+                    "Invalid deallocation at offset {}: block size {} does not match slice length {}, \
+                    indicating a potential violation of the slice origin requirement of dealloc or a memory \
+                    management issue in the application code",
+                    current_offset,
+                    current_len,
+                    slice.len()
+                );
+            }
+            DeallocState::ErrBlockCorrupted(current_size) => {
+                debug_panic_or_io_err!(
+                    InvalidData,
+                    "Corrupted block found at offset {}: block size {} or slice length {} is not valid, which is \
+                    potentially caused by random corruption or a bug in cairnalloc logic",
+                    current_offset,
+                    current_size,
+                    slice.len()
+                );
+            }
+            DeallocState::ErrDoubleFree => {
+                debug_panic_or_io_err!(
+                    InvalidInput,
+                    "Double free detected at offset {}: indicating a double free issue in the application code",
+                    current_offset
+                );
+            }
+            DeallocState::ErrWrongDeadbeefInFreedBlock(offset) => {
+                debug_panic_or_io_err!(
+                    InvalidData,
+                    "Corrupted block found at offset {}, indicating a buffer overflow issue and an use after free \
+                    in the application code while using the block or random corruption",
+                    offset
+                );
+            }
+            DeallocState::ErrWrongDeadbeefInUsedBlock(offset) => {
+                debug_panic_or_io_err!(
+                    InvalidData,
+                    "Corrupted block found at offset {}, indicating a buffer overflow issue, a double free in the \
+                    application code, or a random corruption while using the block and almost certainly a bug in cairnalloc logic",
+                    offset
+                );
+            }
+            DeallocState::ErrSuspectBufferOverflow(offset) => {
+                debug_panic_or_io_err!(
+                    InvalidInput,
+                    "Corrupted block found at offset {}, indicating a buffer overflow issue \
+                    in the application code while using the block or random corruption",
+                    offset
+                );
+            }
+            _ => {}
+        }
         todo!()
     }
 }

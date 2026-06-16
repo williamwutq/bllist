@@ -1253,6 +1253,7 @@ impl BStackAllocator for CairnAlloc {
 
         // Compute sizes. Note that if the meta is zero, disk_size_to_size still works and returns zero, which is correct
         let current_block_size = Self::disk_size_to_size(current_block_meta);
+        let current_block_end = current_offset + current_block_size;
         let prev_block_size = Self::disk_size_to_size(prev_block_meta);
         let next_block_size = Self::disk_size_to_size(next_block_meta);
 
@@ -1263,7 +1264,6 @@ impl BStackAllocator for CairnAlloc {
             // Validate that, start from len.next_multiple_of_8() + 8 to the end of the block, all bytes are zero
             let mut fault = 0u64;
             let cursor_start = slice.end().next_multiple_of(8) + 8;
-            let cursor_end = slice.start() + current_block_size;
             let mut cursor = cursor_start;
             self.stack.get_batched_gen(|| {
                 // Check
@@ -1271,17 +1271,17 @@ impl BStackAllocator for CairnAlloc {
                     fault = cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
                     return None;
                 }
-                if cursor + 32 <= cursor_end {
+                if cursor + 32 <= current_block_end {
                     // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
                     let res = (cursor, unsafe { escape_slice(shared_buf) });
                     cursor += 32;
                     Some(res)
                 } else {
-                    let remaining = (cursor_end - cursor) as usize; // This is safe because remaining is smaller than 32
+                    let remaining = (current_block_end - cursor) as usize; // This is safe because remaining is smaller than 32
                     if remaining > 0 {
                         // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call,
                         // and we only read the valid remaining bytes
-                        cursor = cursor_end;
+                        cursor = current_block_end;
                         Some((cursor, unsafe {
                             escape_slice(&mut shared_buf[..remaining])
                         }))
@@ -1300,8 +1300,13 @@ impl BStackAllocator for CairnAlloc {
         }
         // We avoid zeroing everything because the user should not have touched the memory after the end of the slice
         // This is an optimization and is backed by the fact that out of bounds writes should be undefined behavior
+        // In fact, we cover to the next multiple of 8 plus 8 bytes to remove the deadbeef patterns, however,
+        // we do not want to corrupt the deadbeef that is part of the tail metadata, so min is applied.
         #[cfg(not(debug_assertions))]
-        self.stack.zero(slice.start(), slice.len())?;
+        self.stack.zero(
+            slice.start(),
+            (slice.len().next_multiple_of(8) + 8).min(current_block_end),
+        )?;
 
         todo!("The actual logic")
     }

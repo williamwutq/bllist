@@ -245,6 +245,8 @@ impl Into<u8> for &AllocClass {
 
 const ALLOC_MARKER_BE: [u8; 8] = 0xBAADF00DDEADBEEFu64.to_be_bytes();
 const ALLOC_MARKER_LE: [u8; 8] = 0xBAADF00DDEADBEEFu64.to_le_bytes();
+const ALLOC_MARKER_SMALL: [u8; 2] = 0xDEAD_u16.to_be_bytes();
+const ALLOC_MARKER_MINI: u8 = 0xEF;
 const ALLOC_HEADER_START: u64 = 32;
 const ALLOC_HEADER_SIZE: u64 = 16;
 const ALLOC_CHECKSUM_START: u64 = ALLOC_HEADER_START + ALLOC_HEADER_SIZE; // 48
@@ -367,6 +369,59 @@ impl CairnAlloc {
         let bin_index = class.index_bin();
         self.stack.cross_exchange(bin_index, offset, 8)?;
         Ok(())
+    }
+
+    // Write additional deadbeef markers after the allocated section of the block to help detect buffer
+    // overflows.
+    //
+    // This is safe for a newly allocated block or any allocated block in general since if we overwrite
+    // out of bounds the first 8 bytes of the tail section should be the BE marker
+    fn write_additional_deadbeef(&self, offset: u64, len: u64) -> io::Result<()> {
+        if len % 8 == 0 {
+            self.stack.set(offset + len, &ALLOC_MARKER_BE)
+        } else {
+            let mut buf = [0u8; 16];
+            // buf[0..2].copy_from_slice(&ALLOC_MARKER_SMALL); This line is never used
+            buf[2..4].copy_from_slice(&ALLOC_MARKER_SMALL);
+            buf[4..6].copy_from_slice(&ALLOC_MARKER_SMALL);
+            buf[6..8].copy_from_slice(&ALLOC_MARKER_SMALL);
+            buf[8..].copy_from_slice(&ALLOC_MARKER_BE);
+            // Let say the end looks like this:
+            // ooooooEFDEADDEAD BAADFOODDEADBEEF
+            // The data part (oooooo) can be determined by len % 8, which we skip
+            let skip = (len % 8) as usize; // This cast is safe because skip is always less than 8
+            if len % 2 != 0 {
+                // We overwrite the u8 immediately after "skip"
+                buf[skip] = ALLOC_MARKER_MINI;
+            }
+            self.stack.set(offset + len, &buf[skip..])
+        }
+    }
+
+    /// Validates the additional deadbeef markers after the allocated section of the block to help detect buffer overflows.
+    fn validate_additional_deadbeef(&self, offset: u64, len: u64) -> io::Result<bool> {
+        let skip = (len % 8) as usize;
+        let mut buf = [0u8; 16];
+        self.stack.get_into(offset + len, &mut buf[skip..])?;
+        // buf[8..] should be the BE marker
+        if buf[8..] != ALLOC_MARKER_BE {
+            return Ok(false);
+        }
+        // buf[skip] should be the MINI marker
+        if len % 2 != 0 && buf[0] != ALLOC_MARKER_MINI {
+            return Ok(false);
+        }
+        // Unrolled loop
+        if skip >= 2 && buf[2..4] != ALLOC_MARKER_SMALL {
+            return Ok(false);
+        }
+        if skip >= 4 && buf[4..6] != ALLOC_MARKER_SMALL {
+            return Ok(false);
+        }
+        if skip >= 6 && buf[6..8] != ALLOC_MARKER_SMALL {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Validates the free block at the given offset for the given class by checking the metadata in the block
@@ -657,6 +712,8 @@ impl BStackAllocator for CairnAlloc {
                 self.stack
                     .set(current_head + class_max_size, &shared_buf[0..16])?;
 
+                self.write_additional_deadbeef(current_head, len)?;
+
                 // SAFETY: We have allocated this block with enough space
                 return Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) });
             }
@@ -723,6 +780,9 @@ impl BStackAllocator for CairnAlloc {
 
                     // Link the free block
                     self.try_link_free_block_unchecked(AllocClass::Small32, free_offset)?;
+
+                    self.write_additional_deadbeef(current_head, len)?;
+
                     return Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) });
                 }
             }
@@ -791,6 +851,7 @@ impl BStackAllocator for CairnAlloc {
                 } else {
                     self.split_block(class, current_head, block_len, len, shared_buf)?;
                 }
+                self.write_additional_deadbeef(current_head, len)?;
                 Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) })
             } else {
                 drop(lum_guard);
@@ -803,6 +864,7 @@ impl BStackAllocator for CairnAlloc {
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
                 shared_buf[8..16].copy_from_slice(meta);
                 self.stack.set(ptr + actual_size - 16, &shared_buf[0..16])?;
+                self.write_additional_deadbeef(current_head, len)?;
                 // SAFETY: We have allocated this block with enough space
                 Ok(unsafe { BStackSlice::from_raw_parts(self, ptr + 16, len) })
             };
@@ -874,6 +936,7 @@ impl BStackAllocator for CairnAlloc {
                     shared_buf,
                 )?;
             }
+            self.write_additional_deadbeef(current_head, len)?;
             Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) })
         } else {
             drop(mum_guard);
@@ -886,6 +949,7 @@ impl BStackAllocator for CairnAlloc {
             shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
             shared_buf[8..16].copy_from_slice(meta);
             self.stack.set(ptr + actual_size - 16, &shared_buf[0..16])?;
+            self.write_additional_deadbeef(current_head, len)?;
             // SAFETY: We have allocated this block with enough space
             return Ok(unsafe { BStackSlice::from_raw_parts(self, ptr + 16, len) });
         }
@@ -1088,7 +1152,33 @@ impl BStackAllocator for CairnAlloc {
                         };
                     }
                     DeallocState::ValidateNextBlockTail => {
-
+                        let next_offset = current_offset + Self::disk_size_to_size(current_block_meta) + 32;
+                        // The above is unchecked because current_block_meta has not changed and we have added the same value before,
+                        // and to reach here we must have go down the path of Validate, which requires checked add with additional 32
+                        // to also pass, which means adding offset and size to get next block tail will not overflow
+                        let next_block_deadbeef: [u8; 8] = shared_buf[0..8].try_into().unwrap();
+                        let next_block_meta_tail = get_le!(shared_buf[8..16]; u64);
+                        if next_block_meta & ALLOC_IN_USE_FLAG != 0 {
+                            if next_block_deadbeef == ALLOC_MARKER_LE {
+                                *state = DeallocState::ErrWrongDeadbeefInUsedBlock(next_offset);
+                                continue;
+                            }
+                        } else {
+                            if next_block_deadbeef == ALLOC_MARKER_BE {
+                                *state =
+                                DeallocState::ErrWrongDeadbeefInFreedBlock(next_offset);
+                                continue;
+                            }
+                        }
+                        #[cfg(debug_assertions)]
+                        if next_block_meta_tail != next_block_meta {
+                            panic!(
+                                "Corrupted block found in at offset {}: header and tail metadata do not match",
+                                next_offset
+                            );
+                        } // Otherwise trust the head
+                        *state = DeallocState::ChecksOk;
+                        return None;
                     }
                     // The Error variants
                     _ => return None,
@@ -1151,6 +1241,68 @@ impl BStackAllocator for CairnAlloc {
             }
             _ => {}
         }
-        todo!()
+        // We validate the tail deadbeef
+        if !self.validate_additional_deadbeef(slice.start(), slice.len())? {
+            debug_panic_or_io_err!(
+                InvalidData,
+                "Corrupted block found at offset {}, indicating a buffer overflow issue \
+                in the application code while using the block or random corruption",
+                current_offset
+            );
+        }
+
+        // Compute sizes. Note that if the meta is zero, disk_size_to_size still works and returns zero, which is correct
+        let current_block_size = Self::disk_size_to_size(current_block_meta);
+        let prev_block_size = Self::disk_size_to_size(prev_block_meta);
+        let next_block_size = Self::disk_size_to_size(next_block_meta);
+
+        // If the checks are all good, we can proceed to deallocate the block and coalesce with neighbors if possible
+        // First, we perform zeroing of the entire data section
+        #[cfg(debug_assertions)]
+        {
+            // Validate that, start from len.next_multiple_of_8() + 8 to the end of the block, all bytes are zero
+            let mut fault = 0u64;
+            let cursor_start = slice.end().next_multiple_of(8) + 8;
+            let cursor_end = slice.start() + current_block_size;
+            let mut cursor = cursor_start;
+            self.stack.get_batched_gen(|| {
+                // Check
+                if cursor != cursor_start && shared_buf[..32] != [0u8; 32] {
+                    fault = cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
+                    return None;
+                }
+                if cursor + 32 <= cursor_end {
+                    // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
+                    let res = (cursor, unsafe { escape_slice(shared_buf) });
+                    cursor += 32;
+                    Some(res)
+                } else {
+                    let remaining = (cursor_end - cursor) as usize; // This is safe because remaining is smaller than 32
+                    if remaining > 0 {
+                        // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call,
+                        // and we only read the valid remaining bytes
+                        cursor = cursor_end;
+                        Some((cursor, unsafe {
+                            escape_slice(&mut shared_buf[..remaining])
+                        }))
+                    } else {
+                        None
+                    }
+                }
+            })?;
+            if fault != 0 {
+                panic!(
+                    "Corrupted block found at offset {} since expecting zeroed bytes at stack offset {}, indicating \
+                    a buffer overflow issue in the application code while using the block or random corruption",
+                    current_offset, fault
+                );
+            }
+        }
+        // We avoid zeroing everything because the user should not have touched the memory after the end of the slice
+        // This is an optimization and is backed by the fact that out of bounds writes should be undefined behavior
+        #[cfg(not(debug_assertions))]
+        self.stack.zero(slice.start(), slice.len())?;
+
+        todo!("The actual logic")
     }
 }

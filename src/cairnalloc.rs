@@ -1392,6 +1392,48 @@ impl BStackAllocator for CairnAlloc {
             (slice.len().next_multiple_of(8) + 8).min(current_block_end),
         )?;
 
+        // Speculative unlinking, only for usable prev block that are in sorted list
+        if prev_block_size != 0 && prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
+            // Read the prev and next of prev block
+            self.stack
+                .get_into(prev_block_size, &mut shared_buf[0..16])?;
+            let next_of_prev_block = get_le!(shared_buf[0..8]; u64);
+            let prev_of_prev_block = get_le!(shared_buf[8..16]; u64);
+            self.stack.set(
+                if prev_of_prev_block != 0 {
+                    prev_of_prev_block
+                } else {
+                    AllocClass::alloc_from_size(prev_block_size).index_bin()
+                },
+                &next_of_prev_block.to_le_bytes(),
+            )?;
+            if next_of_prev_block != 0 {
+                self.stack
+                    .set(next_of_prev_block + 8, &prev_of_prev_block.to_le_bytes())?;
+            }
+        }
+        // Speculative unlinking, only for usable next block that are in sorted list
+        if next_block_size != 0 && next_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
+            // Read the prev and next of next block
+            self.stack
+                .get_into(prev_block_size, &mut shared_buf[0..16])?;
+            let next_of_next_block = get_le!(shared_buf[0..8]; u64);
+            let prev_of_next_block = get_le!(shared_buf[8..16]; u64);
+            self.stack.set(
+                if prev_of_next_block != 0 {
+                    prev_of_next_block
+                } else {
+                    AllocClass::alloc_from_size(next_block_size).index_bin()
+                },
+                &next_of_next_block.to_le_bytes(),
+            )?;
+            if next_of_next_block != 0 {
+                self.stack
+                    .set(next_of_next_block + 8, &prev_of_next_block.to_le_bytes())?;
+            }
+        }
+        // At this point, both next and free are unlinked if they are usable and in sorted list
+
         // For coalescing, we check size first, not meta
         if prev_block_size != 0 && next_block_size != 0 {
             // Try coalesce with both sides

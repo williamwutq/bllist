@@ -1,4 +1,4 @@
-use bstack::{BStack, BStackAllocator, BStackSlice, FirstFitBStackAllocator};
+use bstack::{BStack, BStackAllocator, BStackSlice};
 
 use std::{io, num::NonZeroU64, sync::Mutex};
 
@@ -529,12 +529,12 @@ impl CairnAlloc {
                         Some(res)
                     } else {
                         if cursor + 32 == offset {
-                            // The first 8 bytes may contain the pointer to the next free block,
+                            // The first 16 bytes may contain the pointer to the next and prev free block
                             // but the rest should be zero
-                            if shared_buf[8..32] != [0u8; 24] {
+                            if shared_buf[16..32] != [0u8; 24] {
                                 fault = cursor
-                                    + 8
-                                    + shared_buf[8..32].iter().position(|&b| b != 0).unwrap()
+                                    + 16
+                                    + shared_buf[16..32].iter().position(|&b| b != 0).unwrap()
                                         as u64;
                             }
                         } else if shared_buf[..32] != [0u8; 32] {
@@ -561,6 +561,52 @@ impl CairnAlloc {
             }
         }
         Ok(())
+    }
+
+    /// Reads the head and next pointers of a free list
+    fn alloc_list_read(&self, bin_index: u64) -> io::Result<(u64, u64)> {
+        enum ReadState {
+            Head,
+            Current,
+            Next,
+            Done,
+        }
+        let buf = &mut [0u8; 8];
+        let mut current_head = 0u64;
+        let mut next_head = 0u64;
+        let mut read_state = ReadState::Head;
+        self.stack.get_batched_gen(|| {
+            return match read_state {
+                ReadState::Head => {
+                    read_state = ReadState::Current;
+                    // SAFETY: Slice `buf` lives for the duration of the get_batched_gen call
+                    Some((bin_index, unsafe { escape_slice(buf) }))
+                }
+                ReadState::Current => {
+                    current_head = u64::from_le_bytes(*buf);
+                    if current_head == 0 {
+                        read_state = ReadState::Done;
+                        None
+                    } else {
+                        read_state = ReadState::Next;
+                        // SAFETY: Slice `buf` lives for the duration of the get_batched_gen call
+                        Some((current_head, unsafe { escape_slice(buf) }))
+                    }
+                }
+                ReadState::Next => {
+                    next_head = u64::from_le_bytes(*buf);
+                    read_state = ReadState::Done;
+                    if next_head == 0 {
+                        None
+                    } else {
+                        // SAFETY: Slice `buf` lives for the duration of the get_batched_gen call
+                        Some((next_head, unsafe { escape_slice(buf) }))
+                    }
+                }
+                ReadState::Done => None,
+            };
+        })?;
+        Ok((current_head, next_head))
     }
 
     /// Split a block from a mutex-protected unsorted list
@@ -603,8 +649,8 @@ impl CairnAlloc {
         let free_offset = offset + 16 + aligned_size;
         shared_buf[0..8].copy_from_slice(fake_meta);
         shared_buf[8..16].copy_from_slice(&current_size.to_le_bytes());
-        shared_buf[16..24].copy_from_slice(&[0u8; 8]);
-        self.stack.set(offset - 16, &shared_buf[0..24])?;
+        // Do not override any pointer structures
+        self.stack.set(offset - 16, &shared_buf[0..16])?;
 
         // Write block tail metadata and the entire outer block
         shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
@@ -617,6 +663,7 @@ impl CairnAlloc {
         shared_buf[64..72].copy_from_slice(&ALLOC_MARKER_BE);
         shared_buf[72..80].copy_from_slice(free_block_meta);
         self.stack.set(offset + aligned_size, &shared_buf[0..80])?;
+        // TODO: The above section is incorrect
 
         // Write the correct metadata to the header
         shared_buf[0..8].copy_from_slice(real_meta);
@@ -665,24 +712,9 @@ impl BStackAllocator for CairnAlloc {
         // Shared buffer for unknown purposes
         let shared_buf = &mut [0u8; 80];
         let ptr_read_buf: &mut [u8; 8] = &mut shared_buf[64..72].try_into().unwrap();
-        let wptr_read_buf: &mut [u8; 24] = &mut shared_buf[48..72].try_into().unwrap();
-        let mut current_head = 0u64;
+        let wptr_read_buf: &mut [u8; 48] = &mut shared_buf[48..80].try_into().unwrap();
         if class.is_exact_size() {
-            ptr_read_buf.copy_from_slice(&bin_index.to_le_bytes());
-            let mut read_first_block = false;
-            self.stack.get_batched_gen(|| {
-                current_head = u64::from_le_bytes(*ptr_read_buf);
-                if current_head == bin_index {
-                    // SAFETY: Slice `ptr_read_buf` lives for the duration of the get_batched_gen call
-                    Some((current_head, unsafe { escape_slice(ptr_read_buf) }))
-                } else if current_head == 0 || read_first_block {
-                    None
-                } else {
-                    read_first_block = true;
-                    // SAFETY: Slice `ptr_read_buf` lives for the duration of the get_batched_gen call
-                    Some((current_head, unsafe { escape_slice(ptr_read_buf) }))
-                }
-            })?;
+            let (current_head, next_head) = self.alloc_list_read(bin_index)?;
             // TODO: The CAS pattern may contain a ABA problem. For details, see algos/ATOMICLIST.md of bstack
             // https://raw.githubusercontent.com/williamwutq/bstack/refs/heads/master/algos/ATOMICLIST.md
             if current_head != 0
@@ -690,6 +722,10 @@ impl BStackAllocator for CairnAlloc {
                     .stack
                     .cas(bin_index, current_head.to_le_bytes(), &ptr_read_buf)?
             {
+                // Update next block's prev pointer
+                if next_head != 0 {
+                    self.stack.zero(next_head, 8)?;
+                }
                 // After CAS succeeds, we know that other threads cannot touch the block we already allocated
                 // So now we can freely issue calls
                 self.validate_free_block(class, current_head, shared_buf)?;
@@ -701,8 +737,8 @@ impl BStackAllocator for CairnAlloc {
                         .to_le_bytes();
                 shared_buf[0..8].copy_from_slice(meta);
                 shared_buf[8..16].copy_from_slice(&len.to_le_bytes());
-                shared_buf[16..24].copy_from_slice(&[0u8; 8]);
-                self.stack.set(current_head - 16, &shared_buf[0..24])?;
+                shared_buf[16..32].copy_from_slice(&[0u8; 16]);
+                self.stack.set(current_head - 16, &shared_buf[0..32])?;
 
                 // Write block tail metadata: the first 8 bytes are the be marker for allocation, the next 8 bytes are
                 // mirrored identical metadata. Since header is always trusted over tail, if this operation fails, nothing
@@ -724,20 +760,7 @@ impl BStackAllocator for CairnAlloc {
                 let larger_class_max_size = nonzero_into_u64(larger_class.max_data_size());
                 let second_attempt_bin_index = larger_class.index_bin();
                 ptr_read_buf.copy_from_slice(&second_attempt_bin_index.to_le_bytes());
-                let mut read_first_block = false;
-                self.stack.get_batched_gen(|| {
-                    current_head = u64::from_le_bytes(*ptr_read_buf);
-                    if current_head == second_attempt_bin_index {
-                        // SAFETY: Slice `ptr_read_buf` lives for the duration of the get_batched_gen call
-                        Some((current_head, unsafe { escape_slice(ptr_read_buf) }))
-                    } else if current_head == 0 || read_first_block {
-                        None
-                    } else {
-                        read_first_block = true;
-                        // SAFETY: Slice `ptr_read_buf` lives for the duration of the get_batched_gen call
-                        Some((current_head, unsafe { escape_slice(ptr_read_buf) }))
-                    }
-                })?;
+                let (current_head, next_head) = self.alloc_list_read(second_attempt_bin_index)?;
                 // TODO: The CAS pattern may contain a ABA problem. See previous comment for details
                 if current_head != 0
                     && self.stack.cas(
@@ -746,6 +769,10 @@ impl BStackAllocator for CairnAlloc {
                         &ptr_read_buf,
                     )?
                 {
+                    // Update next block's prev pointer
+                    if next_head != 0 {
+                        self.stack.zero(next_head, 8)?;
+                    }
                     self.validate_free_block(larger_class, current_head, shared_buf)?;
 
                     let fake_meta = // First write as if the entire block is in use
@@ -758,8 +785,8 @@ impl BStackAllocator for CairnAlloc {
                     let free_offset = current_head + 16 + class_max_size;
                     shared_buf[0..8].copy_from_slice(fake_meta);
                     shared_buf[8..16].copy_from_slice(&larger_class_max_size.to_le_bytes());
-                    shared_buf[16..24].copy_from_slice(&[0u8; 8]);
-                    self.stack.set(current_head - 16, &shared_buf[0..24])?;
+                    shared_buf[16..32].copy_from_slice(&[0u8; 16]);
+                    self.stack.set(current_head - 16, &shared_buf[0..32])?;
 
                     // Write block tail metadata and the entire outer block
                     shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
@@ -790,7 +817,10 @@ impl BStackAllocator for CairnAlloc {
         }
 
         let mut read_blk_s = 0i8;
-        let mut prev_addr = u64::MAX;
+        let mut cursor = 0u64;
+        let mut prev_head = 0u64;
+        let mut current_head = 0u64;
+        let mut next_head = 0u64;
         let actual_size = align_32(len + 32);
         if class == AllocClass::LargeOrExtend {
             // Tranversing the entire list and try to find a good fit
@@ -798,40 +828,56 @@ impl BStackAllocator for CairnAlloc {
             let lum_guard = self.large_unsorted_mutex.lock().unwrap();
             self.stack.get_batched_gen(|| {
                 if read_blk_s == 0 {
-                    read_blk_s += 1;
+                    read_blk_s = 1;
                     // SAFETY: Slice `ptr_read_buf` lives for the duration of the get_batched_gen call
                     Some((bin_index, unsafe { escape_slice(ptr_read_buf) }))
-                } else if current_head == 0 {
+                } else if cursor == 0 {
                     None
                 } else if read_blk_s == 1 {
-                    current_head = u64::from_le_bytes(*ptr_read_buf);
-                    read_blk_s += 1;
+                    cursor = u64::from_le_bytes(*ptr_read_buf);
+                    read_blk_s = 2;
                     // SAFETY: Slice `wptr_read_buf` lives for the duration of the get_batched_gen call
-                    Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
+                    Some((cursor - 16, unsafe { escape_slice(wptr_read_buf) }))
                 } else if wptr_read_buf[8..16] != [0u8; 8] {
                     // Should not happen
                     // Current error handling is to just ignore the block and continue searching
                     // because this is not a recovery logic here
-                    Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
+                    Some((cursor - 16, unsafe { escape_slice(wptr_read_buf) }))
                 } else {
-                    prev_addr = current_head;
-                    current_head = get_le!(wptr_read_buf[16..24]; u64);
+                    current_head = cursor;
+                    cursor = get_le!(wptr_read_buf[16..24]; u64);
+                    let should_be_prev_head = get_le!(wptr_read_buf[24..32]; u64);
+                    debug_assert_eq!(
+                        should_be_prev_head, prev_head,
+                        "Corrupted prev pointer in large unsorted list at offset {}: expected {}, found {}",
+                        current_head, prev_head, should_be_prev_head
+                    );
                     let block_meta = get_le!(wptr_read_buf[0..8]; u64);
                     let current_len = Self::disk_size_to_size(block_meta);
                     #[cfg(debug_assertions)]
                     if block_meta & ALLOC_IS_SORTED_FLAG != 0 {
                         // Something is not right, sorted blocks should not be in the unsorted list
-                        panic!("Corrupted block found in large unsorted list at offset {}: sorted flag is set", current_head);
+                        panic!("Corrupted block found in large unsorted list at offset {}: sorted flag is set", cursor);
                     }
                     if current_len >= len && block_meta & ALLOC_IN_USE_FLAG == 0 {
+                        next_head = cursor;
                         // We found a big enough block, quit reading more blocks
                         return None;
                     }
+                    prev_head = current_head;
                     // SAFETY: see previous one
-                    Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
+                    Some((cursor - 16, unsafe { escape_slice(wptr_read_buf) }))
                 }
             })?;
             return if current_head != 0 {
+                // Link prev to next and next to prev, effectively removing the block from the list
+                self.stack.set(
+                    if prev_head != 0 { prev_head } else { bin_index },
+                    &next_head.to_le_bytes(),
+                )?;
+                if next_head != 0 {
+                    self.stack.set(next_head + 8, &prev_head.to_le_bytes())?;
+                }
                 self.validate_free_block(class, current_head, shared_buf)?;
                 let block_len = Self::disk_size_to_size(get_le!(wptr_read_buf[0..8]; u64));
                 if block_len - len < 64 {
@@ -853,6 +899,7 @@ impl BStackAllocator for CairnAlloc {
                 }
                 self.write_additional_deadbeef(current_head, len)?;
                 Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) })
+                // drop(lum_guard) happens automatically here due to scope
             } else {
                 drop(lum_guard);
                 let ptr = self.stack.extend(actual_size)?; // 32 bytes for metadata
@@ -864,7 +911,7 @@ impl BStackAllocator for CairnAlloc {
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
                 shared_buf[8..16].copy_from_slice(meta);
                 self.stack.set(ptr + actual_size - 16, &shared_buf[0..16])?;
-                self.write_additional_deadbeef(current_head, len)?;
+                self.write_additional_deadbeef(ptr, len)?;
                 // SAFETY: We have allocated this block with enough space
                 Ok(unsafe { BStackSlice::from_raw_parts(self, ptr + 16, len) })
             };
@@ -872,6 +919,8 @@ impl BStackAllocator for CairnAlloc {
 
         current_head = AllocClass::MediumUnsorted.index_bin();
         let mut best_block_offset = 0u64;
+        let mut prev_of_best_block = 0u64;
+        let mut next_of_best_block = 0u64;
         let mut best_block_size = 18400u64; // The maximum size for medium unsorted class
         // Tranversing the entire list and try to find a good fit
         // This is a best-fit algorithm to reduce fragmentation in the medium range
@@ -882,15 +931,23 @@ impl BStackAllocator for CairnAlloc {
                 read_blk_s += 1;
                 // SAFETY: Slice `ptr_read_buf` lives for the duration of the get_batched_gen call
                 Some((bin_index, unsafe { escape_slice(ptr_read_buf) }))
-            } else if current_head == 0 {
+            } else if cursor == 0 {
                 None
             } else if read_blk_s == 1 {
-                current_head = u64::from_le_bytes(*ptr_read_buf);
+                cursor = u64::from_le_bytes(*ptr_read_buf);
                 read_blk_s += 1;
                 // SAFETY: Slice `wptr_read_buf` lives for the duration of the get_batched_gen call
-                Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
+                Some((cursor - 16, unsafe { escape_slice(wptr_read_buf) }))
             } else {
-                current_head = get_le!(wptr_read_buf[16..24]; u64);
+                current_head = cursor;
+                cursor = get_le!(wptr_read_buf[16..24]; u64);
+                next_head = cursor;
+                let should_be_prev_head = get_le!(wptr_read_buf[24..32]; u64);
+                debug_assert_eq!(
+                    should_be_prev_head, prev_head,
+                    "Corrupted prev pointer in medium unsorted list at offset {}: expected {}, found {}",
+                    current_head, prev_head, should_be_prev_head
+                );
                 let current_size = Self::disk_size_to_size(get_le!(wptr_read_buf[0..8]; u64));
                 if current_size >= len {
                     let d = current_size - align_32(len);
@@ -898,21 +955,40 @@ impl BStackAllocator for CairnAlloc {
                         // This is a good enough block
                         best_block_offset = current_head;
                         best_block_size = current_size;
+                        prev_of_best_block = prev_head;
+                        next_of_best_block = next_head;
                         return None;
                     }
                     // We found a big enough block
-                    if current_head != best_block_offset && current_size < best_block_size {
+                    if cursor != best_block_offset && current_size < best_block_size {
                         best_block_offset = current_head;
                         best_block_size = current_size;
+                        prev_of_best_block = prev_head;
+                        next_of_best_block = next_head;
                     }
                 }
+                prev_head = current_head;
                 // SAFETY: see previous one
-                Some((current_head - 16, unsafe { escape_slice(wptr_read_buf) }))
+                Some((cursor - 16, unsafe { escape_slice(wptr_read_buf) }))
             }
         })?;
 
-        if current_head != 0 {
-            self.validate_free_block(AllocClass::MediumUnsorted, current_head, shared_buf)?;
+        if best_block_offset != 0 {
+            // Link prev to next and next to prev, effectively removing the block from the list
+            self.stack.set(
+                if prev_of_best_block != 0 {
+                    prev_of_best_block
+                } else {
+                    bin_index
+                },
+                &next_of_best_block.to_le_bytes(),
+            )?;
+            if next_of_best_block != 0 {
+                self.stack
+                    .set(next_of_best_block + 8, &prev_of_best_block.to_le_bytes())?;
+            }
+            // Block validation
+            self.validate_free_block(AllocClass::MediumUnsorted, best_block_offset, shared_buf)?;
             let block_len = Self::disk_size_to_size(get_le!(wptr_read_buf[0..8]; u64));
             // We found something
             if block_len - len < 64 {
@@ -921,23 +997,24 @@ impl BStackAllocator for CairnAlloc {
                 shared_buf[0..8].copy_from_slice(&meta.to_le_bytes());
                 shared_buf[8..16].copy_from_slice(&len.to_le_bytes());
                 shared_buf[16..24].copy_from_slice(&[0u8; 8]);
-                self.stack.set(current_head - 16, &shared_buf[0..24])?;
+                self.stack.set(best_block_offset - 16, &shared_buf[0..24])?;
 
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
                 shared_buf[8..16].copy_from_slice(&meta.to_le_bytes());
                 self.stack
-                    .set(current_head - 16 + block_len, &shared_buf[0..16])?;
+                    .set(best_block_offset - 16 + block_len, &shared_buf[0..16])?;
             } else {
                 self.split_block(
                     AllocClass::MediumUnsorted,
-                    current_head,
+                    best_block_offset,
                     block_len,
                     len,
                     shared_buf,
                 )?;
             }
-            self.write_additional_deadbeef(current_head, len)?;
-            Ok(unsafe { BStackSlice::from_raw_parts(self, current_head, len) })
+            self.write_additional_deadbeef(best_block_offset, len)?;
+            Ok(unsafe { BStackSlice::from_raw_parts(self, best_block_offset, len) })
+            // drop(mum_guard) happens automatically here due to scope
         } else {
             drop(mum_guard);
             let ptr = self.stack.extend(actual_size)?; // 32 bytes for metadata
@@ -949,7 +1026,7 @@ impl BStackAllocator for CairnAlloc {
             shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
             shared_buf[8..16].copy_from_slice(meta);
             self.stack.set(ptr + actual_size - 16, &shared_buf[0..16])?;
-            self.write_additional_deadbeef(current_head, len)?;
+            self.write_additional_deadbeef(ptr, len)?;
             // SAFETY: We have allocated this block with enough space
             return Ok(unsafe { BStackSlice::from_raw_parts(self, ptr + 16, len) });
         }
@@ -1241,6 +1318,13 @@ impl BStackAllocator for CairnAlloc {
             }
             _ => {}
         }
+        // An in use block is not usable
+        if prev_block_meta & ALLOC_IN_USE_FLAG != 0 {
+            prev_block_meta = 0;
+        }
+        if next_block_meta & ALLOC_IN_USE_FLAG != 0 {
+            next_block_meta = 0;
+        }
         // We validate the tail deadbeef
         if !self.validate_additional_deadbeef(slice.start(), slice.len())? {
             debug_panic_or_io_err!(
@@ -1307,6 +1391,15 @@ impl BStackAllocator for CairnAlloc {
             slice.start(),
             (slice.len().next_multiple_of(8) + 8).min(current_block_end),
         )?;
+
+        // For coalescing, we check size first, not meta
+        if prev_block_size != 0 && next_block_size != 0 {
+            // Try coalesce with both sides
+        } else if prev_block_size != 0 {
+            // Try coalesce with previous block
+        } else if next_block_size != 0 {
+            // Try coalesce with next block
+        }
 
         todo!("The actual logic")
     }

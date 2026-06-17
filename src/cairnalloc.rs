@@ -2,8 +2,6 @@ use bstack::{BStack, BStackAllocator, BStackSlice};
 
 use std::{io, num::NonZeroU64, sync::Mutex};
 
-use crate::cairnalloc::AllocClass::{LargeOrExtend, MediumUnsorted};
-
 /// In debug builds, panics immediately to give you a stack trace and a core dump.
 /// In release builds, returns an `Err(io::Error)` so the caller can handle it gracefully.
 macro_rules! debug_panic_or_io_err {
@@ -57,12 +55,17 @@ fn align_32(value: u64) -> u64 {
     (value + 31) & !31
 }
 
-#[inline]
-fn nonzero_into_u64(nonzero: Option<NonZeroU64>) -> u64 {
-    nonzero.map_or(0, |n| n.get())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Represents the different allocation classes used by the allocator.
+///
+/// Class Rules:
+/// - Small classes (32 to 256 bytes) have exact sizes and are sorted.
+/// - Medium unsorted contain blocks of sizes 288 to 18400 bytes and are not sorted. The
+///   best strategy is best fit
+/// - Large unsorted (large or extend) contain blocks larger than 18400 bytes and are not sorted.
+///   The best strategy is first fit
+/// - All other medium classes gurrantee that they are larger than the minimum size of the class,
+///   but they may contain blocks of larger sizes.
 enum AllocClass {
     Small32 = 1,
     Small64,
@@ -93,7 +96,7 @@ enum AllocClass {
 
 impl AllocClass {
     /// Gets the maximum data size for this allocation class, excluding the 32 byte block overhead.
-    fn max_data_size(&self) -> Option<NonZeroU64> {
+    fn max_data_size(&self) -> NonZeroU64 {
         match self {
             AllocClass::Small32 => NonZeroU64::new(32),
             AllocClass::Small64 => NonZeroU64::new(64),
@@ -103,15 +106,39 @@ impl AllocClass {
             AllocClass::Small192 => NonZeroU64::new(192),
             AllocClass::Small224 => NonZeroU64::new(224),
             AllocClass::Small256 => NonZeroU64::new(256),
-            AllocClass::MediumUnsorted => None,
+            AllocClass::MediumUnsorted => NonZeroU64::new(18400),
+            AllocClass::Medium544 => NonZeroU64::new(1120 - 32),
+            AllocClass::Medium1120 => NonZeroU64::new(2272 - 32),
+            AllocClass::Medium2272 => NonZeroU64::new(4576 - 32),
+            AllocClass::Medium4576 => NonZeroU64::new(9184 - 32),
+            AllocClass::Medium9184 => NonZeroU64::new(18400 - 32),
+            AllocClass::Medium18400 => NonZeroU64::new(18400 * 2),
+            AllocClass::LargeOrExtend => NonZeroU64::new(u64::MAX), // special case for large or extend
+        }
+        .unwrap() // Safe because all variants have a non-zero maximum size
+    }
+
+    // Get the minimum data size for this allocation class, excluding the 32 byte block overhead.
+    fn min_data_size(&self) -> NonZeroU64 {
+        match self {
+            AllocClass::Small32 => NonZeroU64::new(32),
+            AllocClass::Small64 => NonZeroU64::new(64),
+            AllocClass::Small96 => NonZeroU64::new(96),
+            AllocClass::Small128 => NonZeroU64::new(128),
+            AllocClass::Small160 => NonZeroU64::new(160),
+            AllocClass::Small192 => NonZeroU64::new(192),
+            AllocClass::Small224 => NonZeroU64::new(224),
+            AllocClass::Small256 => NonZeroU64::new(256),
+            AllocClass::MediumUnsorted => NonZeroU64::new(288),
             AllocClass::Medium544 => NonZeroU64::new(544),
             AllocClass::Medium1120 => NonZeroU64::new(1120),
             AllocClass::Medium2272 => NonZeroU64::new(2272),
             AllocClass::Medium4576 => NonZeroU64::new(4576),
             AllocClass::Medium9184 => NonZeroU64::new(9184),
             AllocClass::Medium18400 => NonZeroU64::new(18400),
-            AllocClass::LargeOrExtend => NonZeroU64::new(u64::MAX), // special case for large or extend
+            AllocClass::LargeOrExtend => NonZeroU64::new(18400 + 32),
         }
+        .unwrap() // Safe because all variants have a non-zero minimum size
     }
 
     /// Gets the index in the pointer table for this allocation class, if it has one.
@@ -192,13 +219,27 @@ impl AllocClass {
 
     /// Returns true if this allocation class has a fixed size, meaning
     /// it can only be used for allocations of a specific size.
-    fn is_exact_size(&self) -> bool {
-        !Self::not_exact_size(self)
+    ///
+    /// These classes gurrantee that min_data_size() == max_data_size(),
+    /// and are all the small classes (32 to 256 bytes).
+    ///
+    /// All classes that have exact size are also sorted, but not all sorted classes have exact size.
+    fn has_exact_size(&self) -> bool {
+        self.is_small()
+    }
+
+    /// Returns true if this allocation class is sorted
+    ///
+    /// Do not confuse this with is_exact_size(), which is a different concept.
+    /// A sorted class means that the free blocks in that class are sorted by size,
+    /// while an exact size class means that all blocks in that class have the same size.
+    fn is_sorted(&self) -> bool {
+        !self.is_unsorted()
     }
 
     /// Returns true if this allocation class does not have a fixed size,
     /// meaning it can be used for multiple sizes of allocations.
-    fn not_exact_size(&self) -> bool {
+    fn is_unsorted(&self) -> bool {
         matches!(self, AllocClass::MediumUnsorted | AllocClass::LargeOrExtend)
     }
 
@@ -220,6 +261,7 @@ impl AllocClass {
 
     /// Returns true if this allocation class is one of the medium classes
     /// excluding the unsorted class (544 to 18400 bytes).
+    #[allow(unused)]
     fn is_medium(&self) -> bool {
         matches!(
             self,
@@ -231,6 +273,8 @@ impl AllocClass {
                 | AllocClass::Medium18400
         )
     }
+
+    // There is no is_large() method the only large class is LargeOrExtend
 
     /// Determines the allocation class of a free block based on the size metadata stored in the block header.
     /// This is superior than convert to disk size and call free_from_size because it also accounts for the real
@@ -284,6 +328,7 @@ const ALLOC_DATA_START: u64 = ALLOC_PTR_TABLE_START + ALLOC_PTR_TABLE_SIZE; // 2
 const ALLOC_IN_USE_FLAG: u64 = 1 << 63;
 /// This is the second highest bit of the size field in the block header, used to indicate whether the block is sorted.
 const ALLOC_IS_SORTED_FLAG: u64 = 1 << 62;
+#[allow(unused)] // For future use
 /// This is the third highest bit of the size field in the block header, used to indicate whether the block can be flexibly reallocated
 const ALLOC_CAN_REALLOC_FLAG: u64 = 1 << 61;
 /// This is the fourth highest bit of the size field in the block header, used to indicate whether the block is dirty and needs to be
@@ -475,11 +520,23 @@ impl CairnAlloc {
         shared_buf: &mut [u8],
     ) -> io::Result<()> {
         let head_offset = offset - 16;
-        let class_size = nonzero_into_u64(class.max_data_size());
-        let tail_offset = offset + class_size;
+        let max_class_size = class.max_data_size().get();
+        let min_class_size = class.min_data_size().get();
 
         // Block validation. We can check the metadata in the block header and tail to make sure the block is not corrupted
         self.stack.get_into(head_offset, &mut shared_buf[0..16])?;
+        let block_size = Self::disk_size_to_size(get_le!(shared_buf[0..8]; u64));
+        let tail_offset = match offset.checked_add(block_size) {
+            Some(tail_offset) => tail_offset,
+            None => {
+                debug_panic_or_io_err!(
+                    InvalidData,
+                    "Corrupted block found at offset {}: block size {} is too large and causes overflow",
+                    offset,
+                    block_size
+                );
+            }
+        };
         self.stack.get_into(tail_offset, &mut shared_buf[16..32])?;
         let block_meta_head = get_le!(shared_buf[0..8]; u64);
         if shared_buf[16..24] != ALLOC_MARKER_LE {
@@ -512,25 +569,31 @@ impl CairnAlloc {
         let current_len = Self::disk_size_to_size(block_meta_head);
         #[cfg(debug_assertions)]
         {
-            if class.is_exact_size() {
-                if current_len != class.max_data_size().unwrap().get() {
+            if class.is_sorted() {
+                if class.has_exact_size() && current_len != class.max_data_size().get() {
                     // The block size does not match the class, should not happen
                     panic!(
-                        "Corrupted block found in at offset {}: block size {} does not match class {:?}",
+                        "Corrupted block found in at offset {}: exact block size {} does not match class {:?}",
+                        offset, current_len, class
+                    );
+                } else if current_len < min_class_size || current_len > max_class_size {
+                    // Check it falls within the class range
+                    panic!(
+                        "Corrupted block found in at offset {}: block size {} is out of range for class {:?}",
                         offset, current_len, class
                     );
                 }
                 if block_meta_head & ALLOC_IS_SORTED_FLAG == 0 {
-                    // Exact size block should always be sorted, should not happen
+                    // Sorted block should always be sorted, should not happen
                     panic!(
-                        "Corrupted block found in at offset {}: exact size block is not marked as sorted",
+                        "Corrupted block found in at offset {}: sorted block is not marked as sorted",
                         offset
                     );
                 }
             } else if block_meta_head & ALLOC_IS_SORTED_FLAG != 0 {
-                // Non-exact size block should not be sorted, should not happen
+                // Non-sorted block should never be marked as sorted, should not happen
                 panic!(
-                    "Corrupted block found in at offset {}: non-exact size block is marked as sorted",
+                    "Corrupted block found in at offset {}: non-sorted block is marked as sorted",
                     offset
                 );
             }
@@ -544,7 +607,7 @@ impl CairnAlloc {
             );
         }
         if block_meta_head & ALLOC_DIRTY_FLAG != 0 {
-            self.stack.zero(offset, class_size)?;
+            self.stack.zero(offset, block_size)?;
         } else {
             #[cfg(debug_assertions)]
             {
@@ -572,7 +635,7 @@ impl CairnAlloc {
                             return None;
                         }
                         cursor += 32;
-                        if cursor >= offset + class_size {
+                        if cursor >= offset + block_size {
                             None
                         } else {
                             Some(res)
@@ -669,7 +732,7 @@ impl CairnAlloc {
             .to_le_bytes();
         let real_meta = // Then we will fix the metadata after we successfully claim the block
             &(Self::size_to_disk_size(aligned_size) | ALLOC_IN_USE_FLAG).to_le_bytes();
-        let free_block_meta = &(if free_class.is_exact_size() {
+        let free_block_meta = &(if free_class.is_sorted() {
             0u64 | ALLOC_IS_SORTED_FLAG
         } else {
             0u64
@@ -704,7 +767,7 @@ impl CairnAlloc {
         // too lazy to manually drop mutex and the scope correctly protects it
         // the free_class == class here solely exists to avoid reentry of the mutex
         // which is not reentrant and will cause deadlock.
-        if free_class == class || free_class.is_exact_size() {
+        if free_class == class || free_class.is_sorted() {
             self.try_link_free_block_unchecked(free_class, free_offset)
         } else {
             let _guard = match class {
@@ -738,12 +801,11 @@ impl BStackAllocator for CairnAlloc {
         }
         let class = AllocClass::alloc_from_size(len);
         let bin_index = class.index_bin();
-        let class_max_size = nonzero_into_u64(class.max_data_size());
         // Shared buffer for unknown purposes
         let shared_buf = &mut [0u8; 80];
         let ptr_read_buf: &mut [u8; 8] = &mut shared_buf[64..72].try_into().unwrap();
         let wptr_read_buf: &mut [u8; 48] = &mut shared_buf[48..80].try_into().unwrap();
-        if class.is_exact_size() {
+        if class.is_sorted() {
             let (current_head, next_head) = self.alloc_list_read(bin_index)?;
             // TODO: The CAS pattern may contain a ABA problem. For details, see algos/ATOMICLIST.md of bstack
             // https://raw.githubusercontent.com/williamwutq/bstack/refs/heads/master/algos/ATOMICLIST.md
@@ -762,8 +824,10 @@ impl BStackAllocator for CairnAlloc {
 
                 // Write block head metadata: the first 8 bytes are the size with flags, the next 8 bytes are the used size
                 // If this operation fails, the block is orphaned
+                // TODO: This does not work in debug builds
+                let block_size = Self::disk_size_to_size(get_le!(shared_buf[0..8]; u64));
                 let meta = // The block is definitely sorted, not reallocable, and in use
-                    &(Self::size_to_disk_size(len) | ALLOC_IS_SORTED_FLAG | ALLOC_IN_USE_FLAG)
+                    &(block_size | ALLOC_IS_SORTED_FLAG | ALLOC_IN_USE_FLAG)
                         .to_le_bytes();
                 shared_buf[0..8].copy_from_slice(meta);
                 shared_buf[8..16].copy_from_slice(&len.to_le_bytes());
@@ -776,7 +840,7 @@ impl BStackAllocator for CairnAlloc {
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
                 shared_buf[8..16].copy_from_slice(meta);
                 self.stack
-                    .set(current_head + class_max_size, &shared_buf[0..16])?;
+                    .set(current_head + block_size, &shared_buf[0..16])?;
 
                 self.write_additional_deadbeef(current_head, len)?;
 
@@ -786,8 +850,12 @@ impl BStackAllocator for CairnAlloc {
             // Fall through to other pathes if the CAS fails, which means another thread allocated the block
             // we were trying to take. We can retry but the other paths reduce contention more
             if AllocClass::alloc_from_size(len + 64).is_small() {
+                // && class.is_small() {
+                // Implies AllocClass::alloc_from_size(len) is also small, or that class.is_small(), so exact size,
+                // where block size fetching is not necessary since all blocks in the same class have the same size
                 let larger_class = AllocClass::alloc_from_size(len + 64);
-                let larger_class_max_size = nonzero_into_u64(larger_class.max_data_size());
+                let smaller_class_max_size = class.max_data_size().get();
+                let larger_class_max_size = larger_class.max_data_size().get();
                 let second_attempt_bin_index = larger_class.index_bin();
                 ptr_read_buf.copy_from_slice(&second_attempt_bin_index.to_le_bytes());
                 let (current_head, next_head) = self.alloc_list_read(second_attempt_bin_index)?;
@@ -812,7 +880,7 @@ impl BStackAllocator for CairnAlloc {
                         &(Self::size_to_disk_size(len) | ALLOC_IS_SORTED_FLAG | ALLOC_IN_USE_FLAG).to_le_bytes();
                     let free_block_meta = // This is the metadata we will write to the remaining free block after we split
                         &(0u64 | ALLOC_IS_SORTED_FLAG).to_le_bytes();
-                    let free_offset = current_head + 16 + class_max_size;
+                    let free_offset = current_head + 16 + smaller_class_max_size;
                     shared_buf[0..8].copy_from_slice(fake_meta);
                     shared_buf[8..16].copy_from_slice(&larger_class_max_size.to_le_bytes());
                     shared_buf[16..32].copy_from_slice(&[0u8; 16]);
@@ -828,7 +896,7 @@ impl BStackAllocator for CairnAlloc {
                     shared_buf[64..72].copy_from_slice(&ALLOC_MARKER_BE);
                     shared_buf[72..80].copy_from_slice(free_block_meta);
                     self.stack
-                        .set(current_head + class_max_size, &shared_buf[0..80])?;
+                        .set(current_head + smaller_class_max_size, &shared_buf[0..80])?;
 
                     // Write the correct metadata to the header
                     shared_buf[0..8].copy_from_slice(real_meta);
@@ -920,10 +988,8 @@ impl BStackAllocator for CairnAlloc {
 
                     shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
                     shared_buf[8..16].copy_from_slice(&meta.to_le_bytes());
-                    self.stack.set(
-                        current_head + nonzero_into_u64(class.max_data_size()),
-                        &shared_buf[0..16],
-                    )?;
+                    self.stack
+                        .set(current_head + block_len, &shared_buf[0..16])?;
                 } else {
                     self.split_block(class, current_head, block_len, len, shared_buf)?;
                 }
@@ -1476,7 +1542,7 @@ impl BStackAllocator for CairnAlloc {
             let prev_block_class =
                 AllocClass::determined_class_from_metadata(prev_block_meta).unwrap();
             // Try coalesce with both sides
-            let temp_meta = if class.is_exact_size() {
+            let temp_meta = if class.is_sorted() {
                 Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
             } else {
                 Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
@@ -1508,8 +1574,8 @@ impl BStackAllocator for CairnAlloc {
                 let _guard = match class {
                     // For unsorted classes that need mutex, we use scoping to ensure that the mutex
                     // is held for the entire duration of try_link_free_block_unchecked
-                    MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
-                    LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
+                    AllocClass::MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
+                    AllocClass::LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
                     _ => unreachable!(),
                 };
                 shared_buf[0..8].copy_from_slice(&temp_meta.to_le_bytes());
@@ -1517,7 +1583,8 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(prev_offset - 16, &shared_buf[0..16])?;
                 self.stack.zero(current_offset - 16, 32)?;
                 self.stack.zero(current_block_end, 32)?;
-                self.stack.set(next_block_end + 8, &real_meta.to_le_bytes())?;
+                self.stack
+                    .set(next_block_end + 8, &real_meta.to_le_bytes())?;
                 self.stack.set(prev_offset - 16, &real_meta.to_le_bytes())
             } else {
                 // It certainly is medium_unsorted going into large, because the opposite does not make
@@ -1538,7 +1605,7 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
                 self.try_link_free_block_unchecked(class, prev_offset)
                 // drop(_mum_guard) and drop(_lum_guard) happen automatically here due to scope
-            }
+            };
         } else if prev_block_size != 0 {
             let prev_offset = current_offset - prev_block_size - 32;
             // This will not overflow for valid blocks, because blocks have to fit inside a file
@@ -1552,7 +1619,7 @@ impl BStackAllocator for CairnAlloc {
             // by the speculative unlinking, which means that the best choice here is always to
             // coalesce when possible. We need to change the speculative unlinking logic later.
             // Try coalesce with previous block
-            let temp_meta = if class.is_exact_size() {
+            let temp_meta = if class.is_sorted() {
                 Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
             } else {
                 Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
@@ -1580,15 +1647,16 @@ impl BStackAllocator for CairnAlloc {
                 let _guard = match prev_block_class {
                     // For unsorted classes that need mutex, we use scoping to ensure that the mutex
                     // is held for the entire duration of try_link_free_block_unchecked
-                    MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
-                    LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
+                    AllocClass::MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
+                    AllocClass::LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
                     _ => unreachable!("Only unsorted classes can reach here"),
                 };
                 shared_buf[0..8].copy_from_slice(&temp_meta.to_le_bytes());
                 shared_buf[8..16].copy_from_slice(&[0u8; 8]);
                 self.stack.set(prev_offset - 16, &shared_buf[0..16])?;
                 self.stack.zero(current_offset - 16, 32)?;
-                self.stack.set(current_block_end + 8, &real_meta.to_le_bytes())?;
+                self.stack
+                    .set(current_block_end + 8, &real_meta.to_le_bytes())?;
                 self.stack.set(prev_offset - 16, &real_meta.to_le_bytes())
             } else {
                 // No in place unsorted change. This is a copy of the same process as simple case
@@ -1605,14 +1673,14 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
                 self.try_link_free_block_unchecked(class, prev_offset)
                 // drop(_mum_guard) and drop(_lum_guard) happen automatically here due to scope
-            }
+            };
         } else if next_block_size != 0 {
             // This will not overflow for valid blocks, because blocks have to fit inside a file
             let combined_size = next_block_size + current_block_size + 32;
             // Unwrap is safe because the size cannot be 0
             let class = AllocClass::free_from_size(combined_size).unwrap();
             // Try coalesce with next block
-            let temp_meta = if class.is_exact_size() {
+            let temp_meta = if class.is_sorted() {
                 Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
             } else {
                 Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
@@ -1634,11 +1702,11 @@ impl BStackAllocator for CairnAlloc {
             return match class {
                 // For unsorted classes that need mutex, we use scoping to ensure that the mutex
                 // is held for the entire duration of try_link_free_block_unchecked
-                MediumUnsorted => {
+                AllocClass::MediumUnsorted => {
                     let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
                     self.try_link_free_block_unchecked(class, current_offset)
                 }
-                LargeOrExtend => {
+                AllocClass::LargeOrExtend => {
                     let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
                     self.try_link_free_block_unchecked(class, current_offset)
                 }
@@ -1648,7 +1716,7 @@ impl BStackAllocator for CairnAlloc {
 
         // No coalescing is possible, just link the current block as a free block
         let class = AllocClass::free_from_size(current_block_size).unwrap();
-        let meta = if class.is_exact_size() {
+        let meta = if class.is_sorted() {
             Self::size_to_disk_size(current_block_size) | ALLOC_IS_SORTED_FLAG
         } else {
             Self::size_to_disk_size(current_block_size)
@@ -1662,11 +1730,11 @@ impl BStackAllocator for CairnAlloc {
         self.stack.set(current_block_end, &shared_buf[0..16])?;
         return match class {
             // For unsorted classes that need mutex, we lock the mutex
-            MediumUnsorted => {
+            AllocClass::MediumUnsorted => {
                 let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
                 self.try_link_free_block_unchecked(class, current_offset)
             }
-            LargeOrExtend => {
+            AllocClass::LargeOrExtend => {
                 let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
                 self.try_link_free_block_unchecked(class, current_offset)
             }

@@ -231,6 +231,29 @@ impl AllocClass {
                 | AllocClass::Medium18400
         )
     }
+
+    /// Determines the allocation class of a free block based on the size metadata stored in the block header.
+    /// This is superior than convert to disk size and call free_from_size because it also accounts for the real
+    /// storage of is_sorted flag for blocks, which is important for correctly identifying the class of medium
+    /// and large blocks because they may be in the unsorted list
+    fn determined_class_from_metadata(size_meta: u64) -> Option<AllocClass> {
+        let size = CairnAlloc::disk_size_to_size(size_meta);
+        match Self::free_from_size(size) {
+            None => None,
+            Some(AllocClass::MediumUnsorted) => Some(AllocClass::MediumUnsorted),
+            Some(AllocClass::LargeOrExtend) => Some(AllocClass::LargeOrExtend),
+            Some(class) => {
+                // We can further check the sorted flag to determine the exact class for small blocks
+                if size_meta & ALLOC_IS_SORTED_FLAG != 0 {
+                    Some(class)
+                } else if size <= 18400 {
+                    Some(AllocClass::MediumUnsorted)
+                } else {
+                    Some(AllocClass::LargeOrExtend)
+                }
+            }
+        }
+    }
 }
 
 impl Into<u8> for AllocClass {
@@ -1447,24 +1470,26 @@ impl BStackAllocator for CairnAlloc {
             let next_block_end = next_offset + next_block_size;
             // This will not overflow for valid blocks, because blocks have to fit inside a file
             let combined_size = prev_block_size + current_block_size + next_block_size + 64;
-            // Unwrap is safe because the size cannot be 0
+            // Unwrap is safe because the sizes cannot be 0
             let class = AllocClass::free_from_size(combined_size).unwrap();
+            let prev_block_class =
+                AllocClass::determined_class_from_metadata(prev_block_meta).unwrap();
             // Try coalesce with both sides
-            // TODO: implement unfavorable sizes
+            let temp_meta = if class.is_exact_size() {
+                Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
+            } else {
+                Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
+            };
+            // The real meta is not dirty, but other properties are the same
+            let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
+
             if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
-                // Write dirty meta
-                let temp_meta = if class.is_exact_size() {
-                    Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
-                } else {
-                    Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
-                };
-                // The real meta is not dirty, but other properties are the same
-                let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
                 shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
                 shared_buf[16..24].copy_from_slice(&[0u8; 8]);
                 // This is the pointer to self that is needed for try_link_free_block_unchecked
                 shared_buf[24..32].copy_from_slice(&prev_offset.to_le_bytes());
+                // Write dirty meta and pointer
                 self.stack.set(prev_offset - 16, &shared_buf[8..32])?;
                 // Clean the area that is the gap between the end of previous block and start of current
                 // block. We clear 32 bytes although the length part of meta should be zero already
@@ -1477,34 +1502,62 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
                 // Link
                 return self.try_link_free_block_unchecked(class, prev_offset);
+            } else if prev_block_class == class {
+                // In place unsorted change
+                let _guard = match class {
+                    // For unsorted classes that need mutex, we use scoping to ensure that the mutex
+                    // is held for the entire duration of try_link_free_block_unchecked
+                    MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
+                    LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
+                    _ => unreachable!(),
+                };
             } else {
-                // TODO In place unsorted change
+                // It certainly is medium_unsorted going into large, because the opposite does not make
+                // sense as increasing the size of a large block will not make it fit into medium class.
+                // Since we are in different classes, we cannot do in place unsorted change, but we need
+                // both locks.
+                let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
+                let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
+                shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
+                shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
+                shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+                shared_buf[24..32].copy_from_slice(&prev_offset.to_le_bytes());
+                self.stack.set(prev_offset - 16, &shared_buf[8..32])?;
+                self.stack.zero(current_offset - 16, 32)?;
+                self.stack.zero(current_block_end, 32)?;
+                shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
+                self.stack.set(next_block_end, &shared_buf[0..16])?;
+                self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
+                return self.try_link_free_block_unchecked(class, prev_offset);
+                // drop(_mum_guard) and drop(_lum_guard) happen automatically here due to scope
             }
-            todo!()
         } else if prev_block_size != 0 {
             let prev_offset = current_offset - prev_block_size - 32;
             // This will not overflow for valid blocks, because blocks have to fit inside a file
             let combined_size = prev_block_size + current_block_size + 32;
             // Unwrap is safe because the size cannot be 0
             let class = AllocClass::free_from_size(combined_size).unwrap();
+            let prev_block_class =
+                AllocClass::determined_class_from_metadata(prev_block_meta).unwrap();
             // In the future, maybe unfavorable sizes should not be coalesced, such as those
             // that goes from small to medium unsorted. But the current implementation is limited
             // by the speculative unlinking, which means that the best choice here is always to
             // coalesce when possible. We need to change the speculative unlinking logic later.
             // Try coalesce with previous block
+            let temp_meta = if class.is_exact_size() {
+                Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
+            } else {
+                Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
+            };
+            let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
+
             if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
-                // Write dirty meta
-                let temp_meta = if class.is_exact_size() {
-                    Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
-                } else {
-                    Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
-                };
-                let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
                 shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
                 shared_buf[16..24].copy_from_slice(&[0u8; 8]);
                 // This is the pointer to self that is needed for try_link_free_block_unchecked
                 shared_buf[24..32].copy_from_slice(&prev_offset.to_le_bytes());
+                // Write dirty meta and pointer
                 self.stack.set(prev_offset - 16, &shared_buf[8..32])?;
                 // Clean the area that is the gap between the end of previous block and start of current
                 // block. We clear 32 bytes although the length part of meta should be zero already
@@ -1514,8 +1567,30 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
                 // Link
                 return self.try_link_free_block_unchecked(class, prev_offset);
+            } else if prev_block_class == class {
+                // In place unsorted change
+                let _guard = match prev_block_class {
+                    // For unsorted classes that need mutex, we use scoping to ensure that the mutex
+                    // is held for the entire duration of try_link_free_block_unchecked
+                    MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
+                    LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
+                    _ => unreachable!("Only unsorted classes can reach here"),
+                };
             } else {
-                // TODO In place unsorted change
+                // No in place unsorted change. This is a copy of the same process as simple case
+                let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
+                let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
+                shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
+                shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
+                shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+                shared_buf[24..32].copy_from_slice(&prev_offset.to_le_bytes());
+                self.stack.set(prev_offset - 16, &shared_buf[8..32])?;
+                self.stack.zero(current_offset - 16, 32)?;
+                shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
+                self.stack.set(current_block_end, &shared_buf[0..16])?;
+                self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
+                return self.try_link_free_block_unchecked(class, prev_offset);
+                // drop(_mum_guard) and drop(_lum_guard) happen automatically here due to scope
             }
         } else if next_block_size != 0 {
             // This will not overflow for valid blocks, because blocks have to fit inside a file
@@ -1538,10 +1613,23 @@ impl BStackAllocator for CairnAlloc {
             self.stack.set(current_offset - 16, &shared_buf[8..32])?;
             self.stack.zero(current_block_end, 32)?;
             shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
-            self.stack.set(current_offset + combined_size, &shared_buf[0..16])?;
+            self.stack
+                .set(current_offset + combined_size, &shared_buf[0..16])?;
             self.stack.set(current_offset - 16, &shared_buf[8..24])?;
             // Link
-            return self.try_link_free_block_unchecked(class, current_offset);
+            return match class {
+                // For unsorted classes that need mutex, we use scoping to ensure that the mutex
+                // is held for the entire duration of try_link_free_block_unchecked
+                MediumUnsorted => {
+                    let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
+                    self.try_link_free_block_unchecked(class, current_offset)
+                }
+                LargeOrExtend => {
+                    let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
+                    self.try_link_free_block_unchecked(class, current_offset)
+                }
+                _ => self.try_link_free_block_unchecked(class, current_offset),
+            };
         }
 
         // No coalescing is possible, just link the current block as a free block
@@ -1559,19 +1647,16 @@ impl BStackAllocator for CairnAlloc {
         self.stack.set(current_offset - 16, &shared_buf[8..32])?;
         self.stack.set(current_block_end, &shared_buf[0..16])?;
         return match class {
-            // For unsorted classes that need mutex, we use scoping to ensure that the mutex
-            // is held for the entire duration of try_link_free_block_unchecked
+            // For unsorted classes that need mutex, we lock the mutex
             MediumUnsorted => {
                 let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
                 self.try_link_free_block_unchecked(class, current_offset)
-            },
+            }
             LargeOrExtend => {
                 let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
                 self.try_link_free_block_unchecked(class, current_offset)
-            },
-            _ => {
-                self.try_link_free_block_unchecked(class, current_offset)
-            },
-        }
+            }
+            _ => self.try_link_free_block_unchecked(class, current_offset),
+        };
     }
 }

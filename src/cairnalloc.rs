@@ -684,7 +684,9 @@ impl CairnAlloc {
         // Write block tail metadata and the entire outer block
         shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
         shared_buf[8..16].copy_from_slice(real_meta);
+        // Next pointer is set to self since try_link_free_block_unchecked will cross_exchange
         shared_buf[16..24].copy_from_slice(&free_offset.to_le_bytes());
+        // Prev pointer is zero since it is the head
         shared_buf[24..32].copy_from_slice(&[0u8; 8]);
         // shared_buf[32..48] should be zero
         shared_buf[48..52].copy_from_slice(free_block_meta);
@@ -692,7 +694,6 @@ impl CairnAlloc {
         shared_buf[64..72].copy_from_slice(&ALLOC_MARKER_BE);
         shared_buf[72..80].copy_from_slice(free_block_meta);
         self.stack.set(offset + aligned_size, &shared_buf[0..80])?;
-        // TODO: The above section is incorrect
 
         // Write the correct metadata to the header
         shared_buf[0..8].copy_from_slice(real_meta);
@@ -709,7 +710,7 @@ impl CairnAlloc {
             let _guard = match class {
                 AllocClass::MediumUnsorted => self.medium_unsorted_mutex.lock().unwrap(),
                 AllocClass::LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
-                _ => unreachable!(),
+                _ => unreachable!("Only unsorted classes can get here"),
             };
             self.try_link_free_block_unchecked(free_class, free_offset)
         }

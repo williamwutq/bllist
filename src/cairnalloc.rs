@@ -1,6 +1,6 @@
 use bstack::{BStack, BStackAllocator, BStackSlice};
 
-use std::{f32::consts::E, io, num::NonZeroU64, sync::Mutex};
+use std::{io, num::NonZeroU64, sync::Mutex};
 
 /// In debug builds, panics immediately to give you a stack trace and a core dump.
 /// In release builds, returns an `Err(io::Error)` so the caller can handle it gracefully.
@@ -470,6 +470,11 @@ impl CairnAlloc {
             }
             self.stack.set(offset + len, &buf[skip..])
         }
+    }
+
+    /// Zeros the additional deadbeef markers after the allocated section of the block.
+    fn zero_additional_deadbeef(&self, offset: u64, len: u64) -> io::Result<()> {
+        self.stack.zero(offset + len, 16 - (len % 8))
     }
 
     /// Validates the additional deadbeef markers after the allocated section of the block to help detect buffer overflows.
@@ -1157,7 +1162,7 @@ impl BStackAllocator for CairnAlloc {
                 ),
             ));
         }
-        let shared_buf = &mut [0u8; 32];
+        let shared_buf = &mut [0u8; 40];
         // Perform basic checks to ensure consistency
         self.stack
             .get_into(old_block_offset - 16, &mut shared_buf[0..16])?;
@@ -1234,16 +1239,103 @@ impl BStackAllocator for CairnAlloc {
                 );
             }
         }
+        self.validate_additional_deadbeef(old_block_offset, old_len)?;
 
         // Actual logic starts here
         if old_len == new_len {
-            return Ok(slice);
-        }
+            // Same length optimization, no need to do anything
+            Ok(slice)
+        } else if new_len <= old_block_size {
+            // Same block optimization
+            let wa_new_len = new_len.next_multiple_of(8);
+            let wa_old_len = old_len.next_multiple_of(8);
+            if old_len < new_len {
+                // Just zero and rewrite deadbeef in the new area
+                self.zero_additional_deadbeef(old_block_offset, old_len)?;
+                self.write_additional_deadbeef(old_block_offset, new_len)?;
+                self.stack
+                    .set(old_block_offset - 8, new_len.to_le_bytes())?;
+            } else if wa_new_len - wa_old_len < 64 {
+                // if old_len > new_len
+                // Cannot even split the block
+                // Be careful! We cannot just zero the deadbeef because it might include
+                // the tail deadbeef in the tail metadata, which is not allowed to be zeroed
+                // We can also combine this zeroing with the zeroing of user data, but ignore those
+                // That will be overriden by the new deadbeef
+                let zero_start = old_block_offset + wa_new_len + 8;
+                let zero_end = old_block_offset + (wa_old_len + 8).min(old_block_size);
+                if zero_start < zero_end {
+                    self.stack.zero(zero_start, zero_end - zero_start)?;
+                }
+                // It is entirely possible that zero_end < zero_start by at most 8, and that should
+                // be allowed due to our avoidance of zeroing the tail deadbeef
+                self.write_additional_deadbeef(old_block_offset, new_len)?;
+                self.stack
+                    .set(old_block_offset - 8, new_len.to_le_bytes())?;
+            } else {
+                // The splitting case (note: not split_block which splits free blocks, this one is simpler)
+                let zero_start = old_block_offset + wa_new_len + 8;
+                let zero_len = wa_old_len - wa_new_len;
+                // No condition needed since they are far away enough
+                self.stack.zero(zero_start, zero_len)?;
+                self.write_additional_deadbeef(old_block_offset, new_len)?;
+                self.stack
+                    .set(old_block_offset - 8, new_len.to_le_bytes())?;
 
-        // Same block optimizations
-        // To enter the optimization, we try to trust the length provided by the slice, and check if that is
-        // incorrect in each of the branches.
-        todo!()
+                // Write the intermediate section
+                let a_new_len = wa_new_len.next_multiple_of(32);
+                let free_block_write_start = old_block_offset + 16 + a_new_len; // = free_block_offset - 16
+                let free_block_offset = free_block_write_start + 16;
+                let free_block_len = old_block_size - a_new_len - 32; // This is the leftover
+                let free_block_class = AllocClass::free_from_size(free_block_len).expect("The free block should be big enough for at least 32 bytes of metadata and 32 bytes of data");
+                let new_block_meta =
+                    &(Self::size_to_disk_size(a_new_len) | ALLOC_IN_USE_FLAG).to_le_bytes();
+                let free_meta = &(if free_block_class.is_sorted() {
+                    Self::size_to_disk_size(free_block_len) | ALLOC_IS_SORTED_FLAG
+                } else {
+                    Self::size_to_disk_size(free_block_len)
+                })
+                .to_le_bytes();
+                shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
+                shared_buf[8..16].copy_from_slice(new_block_meta);
+                shared_buf[16..24].copy_from_slice(free_meta);
+                shared_buf[24..32].copy_from_slice(&[0u8; 8]);
+                shared_buf[32..40].copy_from_slice(&free_block_offset.to_le_bytes());
+                self.stack.set(free_block_write_start, &shared_buf[0..40])?;
+
+                // Write the tail section of the free block
+                shared_buf[8..16].copy_from_slice(&ALLOC_MARKER_LE);
+                self.stack
+                    .set(free_block_offset + free_block_len, &shared_buf[8..24])?;
+
+                // Link the free block
+                match free_block_class {
+                    // For unsorted classes that need mutex, we use scoping to ensure that the mutex
+                    // is held for the entire duration of try_link_free_block_unchecked
+                    AllocClass::MediumUnsorted => {
+                        let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
+                        self.try_link_free_block_unchecked(free_block_class, free_block_offset)?;
+                    }
+                    AllocClass::LargeOrExtend => {
+                        let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
+                        self.try_link_free_block_unchecked(free_block_class, free_block_offset)?;
+                    }
+                    _ => self.try_link_free_block_unchecked(free_block_class, free_block_offset)?,
+                };
+            }
+            // SAFETY: We have checked that the new length is smaller than the old block size, so the original block is enough to hold
+            // the new length. We have also updated the metadata and deadbeef accordingly.
+            Ok(unsafe { BStackSlice::from_raw_parts(self, old_block_offset, new_len) })
+        } else {
+            // new_len > old_block_size
+            // TODO: try to coalesce with the next block if it is free and has enough space, which can avoid copying and is more efficient.
+            // Need to find a new block and copy
+            let new_slice = self.alloc(new_len)?;
+            self.stack
+                .copy(old_block_offset, new_slice.start(), old_len)?;
+            self.dealloc(slice)?;
+            Ok(new_slice)
+        }
     }
 
     fn dealloc(&self, slice: BStackSlice<'_, Self>) -> io::Result<()> {

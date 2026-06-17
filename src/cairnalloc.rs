@@ -507,6 +507,12 @@ impl CairnAlloc {
     /// as dirty, in debug mode, we will check if the block is actually clean by reading through the entire block,
     /// which can help detect potential use after free issues in the application code or random corruption.
     /// In release mode, we will trust the metadata and skip this check for performance reasons.
+    /// 
+    /// shared_buf will be populated with:
+    /// - [0..8): head metadata (size of block with flags)
+    /// - [8..16): head metadata (size of allocation, if in use)
+    /// - [16..24): tail marker (should be ALLOC_MARKER_LE)
+    /// - [24..32): tail metadata (size of block with flags, should be the same as head metadata)
     ///
     /// ## Panics
     ///
@@ -613,9 +619,10 @@ impl CairnAlloc {
             {
                 let mut fault = 0u64;
                 let mut cursor = offset;
+                let mut check_buf = [0u8; 32];
                 self.stack.get_batched_gen(|| {
-                    // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
-                    let res = (cursor, unsafe { escape_slice(&mut shared_buf[..32]) });
+                    // SAFETY: `check_buf` lives for the duration of the get_batched_gen call
+                    let res = (cursor, unsafe { escape_slice(&mut check_buf) });
                     if cursor == offset {
                         cursor += 32;
                         Some(res)
@@ -623,15 +630,15 @@ impl CairnAlloc {
                         if cursor + 32 == offset {
                             // The first 16 bytes may contain the pointer to the next and prev free block
                             // but the rest should be zero
-                            if shared_buf[16..32] != [0u8; 24] {
+                            if check_buf[16..32] != [0u8; 16] {
                                 fault = cursor
                                     + 16
-                                    + shared_buf[16..32].iter().position(|&b| b != 0).unwrap()
+                                    + check_buf[16..32].iter().position(|&b| b != 0).unwrap()
                                         as u64;
                             }
-                        } else if shared_buf[..32] != [0u8; 32] {
+                        } else if check_buf != [0u8; 32] {
                             fault =
-                                cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
+                                cursor + check_buf.iter().position(|&b| b != 0).unwrap() as u64;
                             return None;
                         }
                         cursor += 32;
@@ -824,7 +831,6 @@ impl BStackAllocator for CairnAlloc {
 
                 // Write block head metadata: the first 8 bytes are the size with flags, the next 8 bytes are the used size
                 // If this operation fails, the block is orphaned
-                // TODO: This does not work in debug builds
                 let block_size = Self::disk_size_to_size(get_le!(shared_buf[0..8]; u64));
                 let meta = // The block is definitely sorted, not reallocable, and in use
                     &(block_size | ALLOC_IS_SORTED_FLAG | ALLOC_IN_USE_FLAG)

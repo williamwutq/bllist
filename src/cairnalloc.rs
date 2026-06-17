@@ -2,6 +2,8 @@ use bstack::{BStack, BStackAllocator, BStackSlice};
 
 use std::{io, num::NonZeroU64, sync::Mutex};
 
+use crate::cairnalloc::AllocClass::{LargeOrExtend, MediumUnsorted};
+
 /// In debug builds, panics immediately to give you a stack trace and a core dump.
 /// In release builds, returns an `Err(io::Error)` so the caller can handle it gracefully.
 macro_rules! debug_panic_or_io_err {
@@ -1541,6 +1543,35 @@ impl BStackAllocator for CairnAlloc {
             // Link
             return self.try_link_free_block_unchecked(class, current_offset);
         }
-        todo!()
+
+        // No coalescing is possible, just link the current block as a free block
+        let class = AllocClass::free_from_size(current_block_size).unwrap();
+        let meta = if class.is_exact_size() {
+            Self::size_to_disk_size(current_block_size) | ALLOC_IS_SORTED_FLAG
+        } else {
+            Self::size_to_disk_size(current_block_size)
+        };
+        shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
+        shared_buf[8..16].copy_from_slice(&meta.to_le_bytes());
+        shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+        // Pointer
+        shared_buf[24..32].copy_from_slice(&current_offset.to_le_bytes());
+        self.stack.set(current_offset - 16, &shared_buf[8..32])?;
+        self.stack.set(current_block_end, &shared_buf[0..16])?;
+        return match class {
+            // For unsorted classes that need mutex, we use scoping to ensure that the mutex
+            // is held for the entire duration of try_link_free_block_unchecked
+            MediumUnsorted => {
+                let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
+                self.try_link_free_block_unchecked(class, current_offset)
+            },
+            LargeOrExtend => {
+                let _lum_guard = self.large_unsorted_mutex.lock().unwrap();
+                self.try_link_free_block_unchecked(class, current_offset)
+            },
+            _ => {
+                self.try_link_free_block_unchecked(class, current_offset)
+            },
+        }
     }
 }

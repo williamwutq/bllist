@@ -363,12 +363,16 @@ impl CairnAlloc {
     /// This function tries to link a free block at the given offset into the free list of the given class,
     /// assuming that offset is a valid free block of the given class with correct metadata written and the
     /// value at offset is offset itself.
-    ///
     #[inline]
     fn try_link_free_block_unchecked(&self, class: AllocClass, offset: u64) -> io::Result<()> {
+        let buf = &mut [0u8; 8];
+        // head = offset; offset->next = first_block
         let bin_index = class.index_bin();
         self.stack.cross_exchange(bin_index, offset, 8)?;
-        Ok(())
+        self.stack.get_into(offset, buf)?;
+        // first_block->prev = offset
+        self.stack
+            .set(u64::from_le_bytes(*buf), &offset.to_le_bytes())
     }
 
     // Write additional deadbeef markers after the allocated section of the block to help detect buffer
@@ -1436,13 +1440,107 @@ impl BStackAllocator for CairnAlloc {
 
         // For coalescing, we check size first, not meta
         if prev_block_size != 0 && next_block_size != 0 {
+            let prev_offset = current_offset - prev_block_size - 32;
+            let next_offset = current_offset + current_block_size + 32;
+            let next_block_end = next_offset + next_block_size;
+            // This will not overflow for valid blocks, because blocks have to fit inside a file
+            let combined_size = prev_block_size + current_block_size + next_block_size + 64;
+            // Unwrap is safe because the size cannot be 0
+            let class = AllocClass::free_from_size(combined_size).unwrap();
             // Try coalesce with both sides
+            // TODO: implement unfavorable sizes
+            if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
+                // Write dirty meta
+                let temp_meta = if class.is_exact_size() {
+                    Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
+                } else {
+                    Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
+                };
+                // The real meta is not dirty, but other properties are the same
+                let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
+                shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
+                shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
+                shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+                // This is the pointer to self that is needed for try_link_free_block_unchecked
+                shared_buf[24..32].copy_from_slice(&prev_offset.to_le_bytes());
+                self.stack.set(prev_offset - 16, &shared_buf[8..32])?;
+                // Clean the area that is the gap between the end of previous block and start of current
+                // block. We clear 32 bytes although the length part of meta should be zero already
+                self.stack.zero(current_offset - 16, 32)?;
+                // Clean the arean that is the gap between the end of current block and the start of next
+                // block similarly
+                self.stack.zero(current_block_end, 32)?;
+                shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
+                self.stack.set(next_block_end, &shared_buf[0..16])?;
+                self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
+                // Link
+                return self.try_link_free_block_unchecked(class, prev_offset);
+            } else {
+                // TODO In place unsorted change
+            }
+            todo!()
         } else if prev_block_size != 0 {
+            let prev_offset = current_offset - prev_block_size - 32;
+            // This will not overflow for valid blocks, because blocks have to fit inside a file
+            let combined_size = prev_block_size + current_block_size + 32;
+            // Unwrap is safe because the size cannot be 0
+            let class = AllocClass::free_from_size(combined_size).unwrap();
+            // In the future, maybe unfavorable sizes should not be coalesced, such as those
+            // that goes from small to medium unsorted. But the current implementation is limited
+            // by the speculative unlinking, which means that the best choice here is always to
+            // coalesce when possible. We need to change the speculative unlinking logic later.
             // Try coalesce with previous block
+            if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
+                // Write dirty meta
+                let temp_meta = if class.is_exact_size() {
+                    Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
+                } else {
+                    Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
+                };
+                let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
+                shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
+                shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
+                shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+                // This is the pointer to self that is needed for try_link_free_block_unchecked
+                shared_buf[24..32].copy_from_slice(&prev_offset.to_le_bytes());
+                self.stack.set(prev_offset - 16, &shared_buf[8..32])?;
+                // Clean the area that is the gap between the end of previous block and start of current
+                // block. We clear 32 bytes although the length part of meta should be zero already
+                self.stack.zero(current_offset - 16, 32)?;
+                shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
+                self.stack.set(current_block_end, &shared_buf[0..16])?;
+                self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
+                // Link
+                return self.try_link_free_block_unchecked(class, prev_offset);
+            } else {
+                // TODO In place unsorted change
+            }
         } else if next_block_size != 0 {
+            // This will not overflow for valid blocks, because blocks have to fit inside a file
+            let combined_size = next_block_size + current_block_size + 32;
+            // Unwrap is safe because the size cannot be 0
+            let class = AllocClass::free_from_size(combined_size).unwrap();
             // Try coalesce with next block
+            let temp_meta = if class.is_exact_size() {
+                Self::size_to_disk_size(combined_size) | ALLOC_IS_SORTED_FLAG | ALLOC_DIRTY_FLAG
+            } else {
+                Self::size_to_disk_size(combined_size) | ALLOC_DIRTY_FLAG
+            };
+            // The real meta is not dirty, but other properties are the same
+            let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
+            shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
+            shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
+            shared_buf[16..24].copy_from_slice(&[0u8; 8]);
+            // This is the pointer to self that is needed for try_link_free_block_unchecked
+            shared_buf[24..32].copy_from_slice(&current_offset.to_le_bytes());
+            self.stack.set(current_offset - 16, &shared_buf[8..32])?;
+            self.stack.zero(current_block_end, 32)?;
+            shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
+            self.stack.set(current_offset + combined_size, &shared_buf[0..16])?;
+            self.stack.set(current_offset - 16, &shared_buf[8..24])?;
+            // Link
+            return self.try_link_free_block_unchecked(class, current_offset);
         }
-
-        todo!("The actual logic")
+        todo!()
     }
 }

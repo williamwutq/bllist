@@ -1483,7 +1483,7 @@ impl BStackAllocator for CairnAlloc {
             // The real meta is not dirty, but other properties are the same
             let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
 
-            if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
+            return if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
                 shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
                 shared_buf[16..24].copy_from_slice(&[0u8; 8]);
@@ -1501,7 +1501,7 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(next_block_end, &shared_buf[0..16])?;
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
                 // Link
-                return self.try_link_free_block_unchecked(class, prev_offset);
+                self.try_link_free_block_unchecked(class, prev_offset)
             } else if prev_block_class == class {
                 // In place unsorted change
                 let _guard = match class {
@@ -1511,6 +1511,13 @@ impl BStackAllocator for CairnAlloc {
                     LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
                     _ => unreachable!(),
                 };
+                shared_buf[0..8].copy_from_slice(&temp_meta.to_le_bytes());
+                shared_buf[8..16].copy_from_slice(&[0u8; 8]);
+                self.stack.set(prev_offset - 16, &shared_buf[0..16])?;
+                self.stack.zero(current_offset - 16, 32)?;
+                self.stack.zero(current_block_end, 32)?;
+                self.stack.set(next_block_end + 8, &real_meta.to_le_bytes())?;
+                self.stack.set(prev_offset - 16, &real_meta.to_le_bytes())
             } else {
                 // It certainly is medium_unsorted going into large, because the opposite does not make
                 // sense as increasing the size of a large block will not make it fit into medium class.
@@ -1528,7 +1535,7 @@ impl BStackAllocator for CairnAlloc {
                 shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
                 self.stack.set(next_block_end, &shared_buf[0..16])?;
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
-                return self.try_link_free_block_unchecked(class, prev_offset);
+                self.try_link_free_block_unchecked(class, prev_offset)
                 // drop(_mum_guard) and drop(_lum_guard) happen automatically here due to scope
             }
         } else if prev_block_size != 0 {
@@ -1551,7 +1558,7 @@ impl BStackAllocator for CairnAlloc {
             };
             let real_meta = temp_meta & !ALLOC_DIRTY_FLAG;
 
-            if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
+            return if prev_block_meta & ALLOC_IS_SORTED_FLAG != 0 {
                 shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_LE);
                 shared_buf[8..16].copy_from_slice(&temp_meta.to_le_bytes());
                 shared_buf[16..24].copy_from_slice(&[0u8; 8]);
@@ -1566,7 +1573,7 @@ impl BStackAllocator for CairnAlloc {
                 self.stack.set(current_block_end, &shared_buf[0..16])?;
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
                 // Link
-                return self.try_link_free_block_unchecked(class, prev_offset);
+                self.try_link_free_block_unchecked(class, prev_offset)
             } else if prev_block_class == class {
                 // In place unsorted change
                 let _guard = match prev_block_class {
@@ -1576,6 +1583,12 @@ impl BStackAllocator for CairnAlloc {
                     LargeOrExtend => self.large_unsorted_mutex.lock().unwrap(),
                     _ => unreachable!("Only unsorted classes can reach here"),
                 };
+                shared_buf[0..8].copy_from_slice(&temp_meta.to_le_bytes());
+                shared_buf[8..16].copy_from_slice(&[0u8; 8]);
+                self.stack.set(prev_offset - 16, &shared_buf[0..16])?;
+                self.stack.zero(current_offset - 16, 32)?;
+                self.stack.set(current_block_end + 8, &real_meta.to_le_bytes())?;
+                self.stack.set(prev_offset - 16, &real_meta.to_le_bytes())
             } else {
                 // No in place unsorted change. This is a copy of the same process as simple case
                 let _mum_guard = self.medium_unsorted_mutex.lock().unwrap();
@@ -1589,7 +1602,7 @@ impl BStackAllocator for CairnAlloc {
                 shared_buf[8..16].copy_from_slice(&real_meta.to_le_bytes());
                 self.stack.set(current_block_end, &shared_buf[0..16])?;
                 self.stack.set(prev_offset - 16, &shared_buf[8..24])?;
-                return self.try_link_free_block_unchecked(class, prev_offset);
+                self.try_link_free_block_unchecked(class, prev_offset)
                 // drop(_mum_guard) and drop(_lum_guard) happen automatically here due to scope
             }
         } else if next_block_size != 0 {

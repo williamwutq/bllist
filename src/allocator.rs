@@ -233,14 +233,14 @@ impl BinAlloc {
             write_checksum(
                 &mut head_buf[RESERVED_SIZE as usize..(RESERVED_SIZE + HEADER_SIZE) as usize],
             );
-            stack.push(&head_buf)?;
+            stack.push(head_buf)?;
 
             // Push bin pointer region (480 bytes)
             // If this step fails and the previous one succeed, go to case 3 on the next open,
             // which will regenerate the bin pointer region with zeros and extend the file to the
             // full size of the bin pointer region.
             let bin_pointers = [0u8; BIN_POINTERS_SIZE as usize];
-            stack.push(&bin_pointers)?;
+            stack.push(bin_pointers)?;
 
             Ok(Self {
                 stack,

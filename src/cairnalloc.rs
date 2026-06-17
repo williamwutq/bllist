@@ -1,6 +1,6 @@
 use bstack::{BStack, BStackAllocator, BStackSlice};
 
-use std::{io, num::NonZeroU64, sync::Mutex};
+use std::{f32::consts::E, io, num::NonZeroU64, sync::Mutex};
 
 /// In debug builds, panics immediately to give you a stack trace and a core dump.
 /// In release builds, returns an `Err(io::Error)` so the caller can handle it gracefully.
@@ -1145,6 +1145,104 @@ impl BStackAllocator for CairnAlloc {
             self.dealloc(slice)?;
             return Ok(BStackSlice::empty(self));
         }
+        let stack_len = self.stack.len()?;
+        let old_len = slice.len();
+        let old_block_offset = slice.start();
+        if old_block_offset < ALLOC_DATA_START + 16 || old_block_offset + 48 > stack_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid reallocation at offset {}: offset is out of bounds",
+                    old_block_offset
+                ),
+            ));
+        }
+        let shared_buf = &mut [0u8; 32];
+        // Perform basic checks to ensure consistency
+        self.stack
+            .get_into(old_block_offset - 16, &mut shared_buf[0..16])?;
+        let old_block_meta = get_le!(shared_buf[0..8]; u64);
+        let real_old_block_len = get_le!(shared_buf[8..16]; u64);
+        if old_block_meta & ALLOC_IN_USE_FLAG == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid reallocation at offset {}: block is not in use, indicating a potential use \
+                    after free issue in the application code",
+                    old_block_offset
+                ),
+            ));
+        }
+        if real_old_block_len != old_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid reallocation at offset {}: block size {} does not match slice length {}, \
+                    indicating a potential violation of the slice origin requirement of dealloc or a memory \
+                    management issue in the application code",
+                    old_block_offset, real_old_block_len, old_len
+                ),
+            ));
+        }
+        let old_block_size = Self::disk_size_to_size(old_block_meta);
+        if old_block_size >= old_len
+            && let old_block_end_plus_16 = old_block_offset.checked_add(old_block_size).unwrap()
+        {
+            if old_block_end_plus_16 > stack_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid reallocation at offset {}: block end offset {} is out of bounds",
+                        old_block_offset, old_block_end_plus_16
+                    ),
+                ));
+            }
+            self.stack
+                .get_into(old_block_end_plus_16 - 16, &mut shared_buf[16..32])?;
+        } else {
+            debug_panic_or_io_err!(
+                InvalidData,
+                "Corrupted block found at offset {}: block size {} or slice length {} is not valid, which is \
+                potentially caused by random corruption or a bug in cairnalloc logic",
+                old_block_offset,
+                old_block_size,
+                old_len
+            );
+        }
+        if shared_buf[16..24] == ALLOC_MARKER_LE {
+            debug_panic_or_io_err!(
+                InvalidData,
+                "Corrupted block found at offset {}, indicating a buffer overflow issue, a double free in the \
+                application code, or a random corruption while using the block and almost certainly a bug in cairnalloc logic",
+                old_block_offset
+            );
+        } else if shared_buf[16..24] != ALLOC_MARKER_BE {
+            debug_panic_or_io_err!(
+                InvalidData,
+                "Corrupted block found at offset {}, indicating a buffer overflow issue \
+                in the application code while using the block or random corruption",
+                old_block_offset
+            );
+        }
+        #[cfg(debug_assertions)]
+        {
+            let tail_block_meta = get_le!(shared_buf[8..16]; u64);
+            if old_block_meta != tail_block_meta {
+                panic!(
+                    "Corrupted block found in at offset {}: header and tail metadata do not match",
+                    slice.start() - 16
+                );
+            }
+        }
+
+        // Actual logic starts here
+        if old_len == new_len {
+            return Ok(slice);
+        }
+
+        // Same block optimizations
+        // To enter the optimization, we try to trust the length provided by the slice, and check if that is
+        // incorrect in each of the branches.
         todo!()
     }
 

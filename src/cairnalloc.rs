@@ -1393,6 +1393,11 @@ impl BStackAllocator for CairnAlloc {
                         prev_block_meta = get_le!(shared_buf[8..16]; u64);
                         current_block_meta = get_le!(shared_buf[16..24]; u64);
                         let current_block_in_use_len = get_le!(shared_buf[24..32]; u64);
+                        if current_block_in_use_len == 0 {
+                            // Block is already freed
+                            *state = DeallocState::ErrDoubleFree;
+                            continue;
+                        }
                         if current_block_in_use_len != slice.len() {
                             // Invalid deallocation
                             *state =
@@ -1649,7 +1654,10 @@ impl BStackAllocator for CairnAlloc {
                     fault = cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
                     return None;
                 }
-                if cursor + 32 <= current_block_end {
+                if cursor >= current_block_end {
+                    return None;
+                }
+                if cursor <= current_block_end.saturating_sub(32) {
                     // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
                     let res = (cursor, unsafe { escape_slice(shared_buf) });
                     cursor += 32;

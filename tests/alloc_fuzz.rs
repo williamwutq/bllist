@@ -8,6 +8,7 @@ mod alloc_fuzz {
     use rand::{Rng, RngExt, SeedableRng, rngs::StdRng, rngs::ThreadRng};
     use std::{
         env, fs, io,
+        io::Read,
         ops::Range,
         path, process,
         sync::Mutex,
@@ -129,6 +130,59 @@ mod alloc_fuzz {
         }
 
         panic!("{msg}");
+    }
+
+    fn print_entire_bstack(stack: &BStack) {
+        let mut offset = 0u64;
+        println!("Entire BStack contents:");
+        let mut reader = stack.reader();
+        loop {
+            let mut buf = [0u8; 16];
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let hex: String = buf[..n]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| {
+                            if i == 8 {
+                                format!(" {:02x}", b)
+                            } else {
+                                format!("{:02x}", b)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    // hex width: 3n-1 for n≤8 (no group gap), 3n for n>8 (group gap adds 1)
+                    let hex_width = if n <= 8 { 3 * n - 1 } else { 3 * n };
+                    let pad = " ".repeat(48 - hex_width);
+                    let interp: String = [0usize, 8]
+                        .iter()
+                        .filter(|&&start| start < n)
+                        .map(|&start| {
+                            let end = (start + 8).min(n);
+                            let chunk = &buf[start..end];
+                            if chunk.len() == 8 {
+                                let val = u64::from_le_bytes(chunk.try_into().unwrap());
+                                format!("{val:>20}")
+                            } else {
+                                let mut arr = [0u8; 8];
+                                arr[..chunk.len()].copy_from_slice(chunk);
+                                let val = u64::from_le_bytes(arr);
+                                format!("{val:>20}?")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    println!("{offset:08x}  {hex}{pad}  |{interp}|");
+                    offset += n as u64;
+                }
+                Err(e) => {
+                    eprintln!("Error reading BStack at offset {offset:08x}: {e}");
+                    break;
+                }
+            }
+        }
     }
 
     fn write_id<A: BStackSliceAllocator>(s: &BStackSlice<'_, A>, id: u64, bias: u64) {

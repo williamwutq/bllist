@@ -490,7 +490,7 @@ impl CairnAlloc {
             return Ok(false);
         }
         // buf[skip] should be the MINI marker
-        if !len.is_multiple_of(2) && buf[0] != ALLOC_MARKER_MINI {
+        if !len.is_multiple_of(2) && buf[skip] != ALLOC_MARKER_MINI {
             return Ok(false);
         }
         // Unrolled loop
@@ -1135,7 +1135,7 @@ impl BStackAllocator for CairnAlloc {
             shared_buf[0..8].copy_from_slice(&ALLOC_MARKER_BE);
             shared_buf[8..16].copy_from_slice(meta);
             self.stack.set(ptr + actual_size - 16, &shared_buf[0..16])?;
-            self.write_additional_deadbeef(ptr, len)?;
+            self.write_additional_deadbeef(ptr + 16, len)?;
             // SAFETY: We have allocated this block with enough space
             Ok(unsafe { BStackSlice::from_raw_parts(self, ptr + 16, len) })
         }
@@ -1194,7 +1194,7 @@ impl BStackAllocator for CairnAlloc {
         }
         let old_block_size = Self::disk_size_to_size(old_block_meta);
         if old_block_size >= old_len
-            && let old_block_end_plus_16 = old_block_offset.checked_add(old_block_size).unwrap()
+            && let old_block_end_plus_16 = old_block_offset.checked_add(old_block_size + 16).unwrap()
         {
             if old_block_end_plus_16 > stack_len {
                 return Err(io::Error::new(
@@ -1234,11 +1234,11 @@ impl BStackAllocator for CairnAlloc {
         }
         #[cfg(debug_assertions)]
         {
-            let tail_block_meta = get_le!(shared_buf[8..16]; u64);
+            let tail_block_meta = get_le!(shared_buf[24..32]; u64);
             if old_block_meta != tail_block_meta {
                 panic!(
                     "Corrupted block found in at offset {}: header and tail metadata do not match",
-                    slice.start() - 16
+                    slice.start()
                 );
             }
         }

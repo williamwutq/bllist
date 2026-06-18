@@ -1,10 +1,7 @@
 mod alloc_fuzz {
     use bllist::cairnalloc::CairnAlloc;
     // Adapted from source code of bstack fuzz tests
-    use bstack::{
-        BStack, BStackSlice, BStackSliceAllocator, CheckedSlabBStackAllocator,
-        FirstFitBStackAllocator,
-    };
+    use bstack::{BStack, BStackSlice, BStackSliceAllocator};
     use rand::{Rng, RngExt, SeedableRng, rngs::StdRng, rngs::ThreadRng};
     use std::{
         env, fs, io,
@@ -132,6 +129,7 @@ mod alloc_fuzz {
         panic!("{msg}");
     }
 
+    #[allow(dead_code)]
     fn print_entire_bstack(stack: &BStack) {
         let mut offset = 0u64;
         println!("Entire BStack contents:");
@@ -551,9 +549,37 @@ mod alloc_fuzz {
         alloc.dealloc(target).unwrap();
 
         // Reconstruct a handle to the same region and free it a second time.
+        // In debug builds the allocator panics with the error message instead of returning Err.
         let again = unsafe { BStackSlice::from_raw_parts(&alloc, start, len) };
-        let result = alloc.dealloc(again);
-        assert!(result.is_err(), "double-free must return an error");
+        #[cfg(debug_assertions)]
+        {
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| alloc.dealloc(again)));
+            match outcome {
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("");
+                    assert!(
+                        msg.to_lowercase().contains("double free"),
+                        "double-free panic message must mention \"double free\", got: {msg:?}"
+                    );
+                }
+                Ok(_) => panic!("double-free must panic in debug builds"),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let result = alloc.dealloc(again);
+            let err = result.expect_err("double-free must return an error");
+            let msg = err.to_string().to_lowercase();
+            assert!(
+                msg.contains("double free"),
+                "double-free error message must mention \"double free\", got: {msg:?}"
+            );
+        }
 
         alloc.dealloc(before).unwrap();
         alloc.dealloc(after).unwrap();

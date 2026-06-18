@@ -21,4 +21,5 @@ tokio = { version = "1", features = ["rt"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+rand = { version = "0.10" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

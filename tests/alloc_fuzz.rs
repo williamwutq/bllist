@@ -306,16 +306,21 @@ mod alloc_fuzz {
                         let old_len = s.len();
                         match alloc.realloc(*s, new_len) {
                             Ok(s2) => {
+                                // Verify preserved prefix (min of old and new length).
+                                let preserved = old_len.min(new_len);
                                 verify_id(
-                                    &s2.subslice(0, old_len),
+                                    &s2.subslice(0, preserved),
                                     *id,
                                     thread_unique_bias,
                                     "fuzz - realloc",
                                 );
-                                check_is_zero(
-                                    &s2.subslice(old_len, new_len).read().unwrap(),
-                                    "fuzz - realloc",
-                                );
+                                // Only check zero-extension when the allocation grew.
+                                if new_len > old_len {
+                                    check_is_zero(
+                                        &s2.subslice(old_len, new_len).read().unwrap(),
+                                        "fuzz - realloc",
+                                    );
+                                }
                                 write_id(&s2, *id, thread_unique_bias);
                                 *s = s2;
                             }

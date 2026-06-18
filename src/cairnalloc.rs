@@ -1194,7 +1194,8 @@ impl BStackAllocator for CairnAlloc {
         }
         let old_block_size = Self::disk_size_to_size(old_block_meta);
         if old_block_size >= old_len
-            && let old_block_end_plus_16 = old_block_offset.checked_add(old_block_size + 16).unwrap()
+            && let old_block_end_plus_16 =
+                old_block_offset.checked_add(old_block_size + 16).unwrap()
         {
             if old_block_end_plus_16 > stack_len {
                 return Err(io::Error::new(
@@ -1258,7 +1259,7 @@ impl BStackAllocator for CairnAlloc {
                 self.write_additional_deadbeef(old_block_offset, new_len)?;
                 self.stack
                     .set(old_block_offset - 8, new_len.to_le_bytes())?;
-            } else if wa_new_len - wa_old_len < 64 {
+            } else if wa_new_len < 64 + wa_old_len {
                 // if old_len > new_len
                 // Cannot even split the block
                 // Be careful! We cannot just zero the deadbeef because it might include
@@ -1648,40 +1649,42 @@ impl BStackAllocator for CairnAlloc {
             let mut fault = 0u64;
             let cursor_start = slice.end().next_multiple_of(8) + 8;
             let mut cursor = cursor_start;
-            self.stack.get_batched_gen(|| {
-                // Check
-                if cursor != cursor_start && shared_buf[..32] != [0u8; 32] {
-                    fault = cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
-                    return None;
-                }
-                if cursor >= current_block_end {
-                    return None;
-                }
-                if cursor <= current_block_end.saturating_sub(32) {
-                    // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
-                    let res = (cursor, unsafe { escape_slice(shared_buf) });
-                    cursor += 32;
-                    Some(res)
-                } else {
-                    let remaining = (current_block_end - cursor) as usize; // This is safe because remaining is smaller than 32
-                    if remaining > 0 {
-                        // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call,
-                        // and we only read the valid remaining bytes
-                        cursor = current_block_end;
-                        Some((cursor, unsafe {
-                            escape_slice(&mut shared_buf[..remaining])
-                        }))
-                    } else {
-                        None
+            if cursor_start < current_block_end {
+                self.stack.get_batched_gen(|| {
+                    // Check
+                    if cursor != cursor_start && shared_buf[..32] != [0u8; 32] {
+                        fault = cursor + shared_buf.iter().position(|&b| b != 0).unwrap() as u64;
+                        return None;
                     }
-                }
-            })?;
-            if fault != 0 {
-                panic!(
-                    "Corrupted block found at offset {} since expecting zeroed bytes at stack offset {}, indicating \
+                    if cursor >= current_block_end {
+                        return None;
+                    }
+                    if cursor <= current_block_end.saturating_sub(32) {
+                        // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call
+                        let res = (cursor, unsafe { escape_slice(shared_buf) });
+                        cursor += 32;
+                        Some(res)
+                    } else {
+                        let remaining = (current_block_end - cursor) as usize; // This is safe because remaining is smaller than 32
+                        if remaining > 0 {
+                            // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call,
+                            // and we only read the valid remaining bytes
+                            cursor = current_block_end;
+                            Some((cursor, unsafe {
+                                escape_slice(&mut shared_buf[..remaining])
+                            }))
+                        } else {
+                            None
+                        }
+                    }
+                })?;
+                if fault != 0 {
+                    panic!(
+                        "Corrupted block found at offset {} since expecting zeroed bytes at stack offset {}, indicating \
                     a buffer overflow issue in the application code while using the block or random corruption",
-                    current_offset, fault
-                );
+                        current_offset, fault
+                    );
+                }
             }
         }
         // We avoid zeroing everything because the user should not have touched the memory after the end of the slice

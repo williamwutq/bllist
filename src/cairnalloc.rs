@@ -479,7 +479,10 @@ impl CairnAlloc {
 
     /// Validates the additional deadbeef markers after the allocated section of the block to help detect buffer overflows.
     fn validate_additional_deadbeef(&self, offset: u64, len: u64) -> io::Result<bool> {
-        let skip = (len % 8) as usize;
+        let mut skip = (len % 8) as usize;
+        if skip == 0 {
+            skip = 8;
+        }
         let mut buf = [0u8; 16];
         self.stack.get_into(offset + len, &mut buf[skip..])?;
         // buf[8..] should be the BE marker
@@ -491,13 +494,13 @@ impl CairnAlloc {
             return Ok(false);
         }
         // Unrolled loop
-        if skip >= 2 && buf[2..4] != ALLOC_MARKER_SMALL {
+        if skip <= 2 && buf[2..4] != ALLOC_MARKER_SMALL {
             return Ok(false);
         }
-        if skip >= 4 && buf[4..6] != ALLOC_MARKER_SMALL {
+        if skip <= 4 && buf[4..6] != ALLOC_MARKER_SMALL {
             return Ok(false);
         }
-        if skip >= 6 && buf[6..8] != ALLOC_MARKER_SMALL {
+        if skip <= 6 && buf[6..8] != ALLOC_MARKER_SMALL {
             return Ok(false);
         }
         Ok(true)
@@ -815,7 +818,7 @@ impl BStackAllocator for CairnAlloc {
         // Shared buffer for unknown purposes
         let shared_buf = &mut [0u8; 80];
         let ptr_read_buf: &mut [u8; 8] = &mut shared_buf[64..72].try_into().unwrap();
-        let wptr_read_buf: &mut [u8; 48] = &mut shared_buf[48..80].try_into().unwrap();
+        let wptr_read_buf: &mut [u8; 32] = &mut shared_buf[48..80].try_into().unwrap();
         if class.is_sorted() {
             let (current_head, next_head) = self.alloc_list_read(bin_index)?;
             // TODO: The CAS pattern may contain a ABA problem. For details, see algos/ATOMICLIST.md of bstack
@@ -1401,8 +1404,8 @@ impl BStackAllocator for CairnAlloc {
                             let prev_block_size = Self::disk_size_to_size(prev_block_meta);
                             let a = current_offset - 32; // This is unchecked because we have done basic checks
                             match a.checked_sub(prev_block_size) {
-                                Some(prev_offset) if prev_offset < ALLOC_DATA_START => {
-                                    if prev_block_deadbeef != ALLOC_MARKER_BE || prev_block_deadbeef != ALLOC_MARKER_LE {
+                                Some(prev_offset) if prev_offset <= ALLOC_DATA_START => {
+                                    if prev_block_deadbeef != ALLOC_MARKER_BE && prev_block_deadbeef != ALLOC_MARKER_LE {
                                         // It is highly likely that this is an application level buffer overflow issue
                                         *state = DeallocState::ErrSuspectBufferOverflow(prev_offset);
                                         continue;
@@ -1620,7 +1623,7 @@ impl BStackAllocator for CairnAlloc {
         if !self.validate_additional_deadbeef(slice.start(), slice.len())? {
             debug_panic_or_io_err!(
                 InvalidData,
-                "Corrupted block found at offset {}, indicating a buffer overflow issue \
+                "Corrupted block found at offset {} as tail marking does not match, indicating a buffer overflow issue \
                 in the application code while using the block or random corruption",
                 current_offset
             );

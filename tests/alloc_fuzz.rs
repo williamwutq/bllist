@@ -270,6 +270,7 @@ mod alloc_fuzz {
                     "fuzz",
                 );
             }
+            print_entire_bstack(&alloc.stack()); // for debugging: see entire stack state in fuzz logs
             match size_gen(&mut rng) {
                 Operation::Alloc(len) => {
                     if !check_or_increment_counters(

@@ -1669,10 +1669,11 @@ impl BStackAllocator for CairnAlloc {
                         if remaining > 0 {
                             // SAFETY: Slice `shared_buf` lives for the duration of the get_batched_gen call,
                             // and we only read the valid remaining bytes
-                            cursor = current_block_end;
-                            Some((cursor, unsafe {
+                            let res = (cursor, unsafe {
                                 escape_slice(&mut shared_buf[..remaining])
-                            }))
+                            });
+                            cursor = current_block_end;
+                            Some(res)
                         } else {
                             None
                         }
@@ -1681,7 +1682,7 @@ impl BStackAllocator for CairnAlloc {
                 if fault != 0 {
                     panic!(
                         "Corrupted block found at offset {} since expecting zeroed bytes at stack offset {}, indicating \
-                    a buffer overflow issue in the application code while using the block or random corruption",
+                        a buffer overflow issue in the application code while using the block or random corruption",
                         current_offset, fault
                     );
                 }

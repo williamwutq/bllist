@@ -272,6 +272,7 @@ pub mod dynamic_dbl;
 pub mod error;
 pub mod fixed;
 pub mod fixed_dbl;
+pub mod use_sims;
 
 #[cfg(feature = "async")]
 pub mod async_dynamic;

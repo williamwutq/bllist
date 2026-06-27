@@ -360,8 +360,26 @@ fn bench_alloc(c: &mut Criterion) {
         c,
         BenchDebugLevel::Panic,
         "alloc_mixed",
+        "CheckedSlabBStackAllocator_48",
+        |stack| CheckedSlabBStackAllocator::new(stack, 48),
+        default_opgen,
+        |rng| gamma_sample_u64(rng, 1024, 2.0, 1.0),
+    );
+    bench_allocator(
+        c,
+        BenchDebugLevel::Panic,
+        "alloc_mixed",
         "CheckedSlabBStackAllocator_64",
         |stack| CheckedSlabBStackAllocator::new(stack, 64),
+        default_opgen,
+        |rng| gamma_sample_u64(rng, 1024, 2.0, 1.0),
+    );
+    bench_allocator(
+        c,
+        BenchDebugLevel::Panic,
+        "alloc_mixed",
+        "CheckedSlabBStackAllocator_128",
+        |stack| CheckedSlabBStackAllocator::new(stack, 128),
         default_opgen,
         |rng| gamma_sample_u64(rng, 1024, 2.0, 1.0),
     );
